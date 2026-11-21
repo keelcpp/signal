@@ -18,9 +18,32 @@ if(NOT TARGET keel::keel)
     FetchContent_Declare(
         keel
         GIT_REPOSITORY https://github.com/keelcpp/keel.git
-        GIT_TAG        b905b095c1b30d5162794c160b2841544a4a4e12
+        GIT_TAG        869a5c07a5d77341e5f6acbac5f8e024b274ea08
     )
     FetchContent_MakeAvailable(keel)
+endif()
+
+if(NOT TARGET keel::fft)
+    find_package(keel_fft QUIET CONFIG)
+    if(TARGET keel::keel_fft AND NOT TARGET keel::fft)
+        add_library(keel::fft ALIAS keel::keel_fft)
+    endif()
+endif()
+if(NOT TARGET keel::fft)
+    include(FetchContent)
+    set(KEEL_FFT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../fft/CMakeLists.txt" AND NOT DEFINED FETCHCONTENT_SOURCE_DIR_KEEL_FFT)
+        set(FETCHCONTENT_SOURCE_DIR_KEEL_FFT "${CMAKE_CURRENT_SOURCE_DIR}/../fft" CACHE PATH "Local keel_fft checkout")
+    endif()
+    if(KEEL_SIGNAL_NO_EXCEPTIONS_RTTI)
+        set(KEEL_FFT_NO_EXCEPTIONS_RTTI ON CACHE BOOL "" FORCE)
+    endif()
+    FetchContent_Declare(
+        keel_fft
+        GIT_REPOSITORY https://github.com/keelcpp/fft.git
+        GIT_TAG        740bed99088ffb27d58fa2aa8e70b9d66f59100f
+    )
+    FetchContent_MakeAvailable(keel_fft)
 endif()
 
 add_library(keel_signal STATIC
@@ -28,10 +51,19 @@ add_library(keel_signal STATIC
     src/conv.cpp
     src/filter.cpp
     src/transforms.cpp
+    src/dct.cpp
+    src/fwht.cpp
+    src/hilbert.cpp
+    src/smoothing.cpp
+    src/findpeaks.cpp
+    src/spectral.cpp
 )
 add_library(keel::signal ALIAS keel_signal)
 
-target_link_libraries(keel_signal PUBLIC keel::keel)
+target_link_libraries(keel_signal
+    PUBLIC  keel::keel
+    PRIVATE keel::fft
+)
 
 target_compile_features(keel_signal PUBLIC cxx_std_20)
 set_target_properties(keel_signal PROPERTIES
@@ -65,6 +97,7 @@ if(COMMAND keel_enforce_guidelines)
     keel_enforce_guidelines(keel_signal
         SCOPE ALL
         BAN_RAW_INTS ALL
+        BAN_RAW_FLOATS ALL
         HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include"
         STANDALONE_HEADERS ${KEEL_SIGNAL_BUILD_TESTS}
         TEST_NAME test_guidelines_headers

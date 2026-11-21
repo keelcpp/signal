@@ -310,6 +310,166 @@ void test_goertzel_and_unwrap() {
     }
 }
 
+void test_dct_fwht_hilbert() {
+    // DCT types 1..4 roundtrip (both small direct N=10 and FFT-accelerated N=32 & non-pow2 N=25)
+    for (usize len : {usize{10}, usize{25}, usize{32}}) {
+        keel::Array<f64> x(len, 0.0), y(len, 0.0), z(len, 0.0);
+        for (usize i = 0; i < len; ++i) {
+            x[i] = keel::sin(0.37 * keel::as<f64>(i)) + 0.5 * keel::cos(1.1 * keel::as<f64>(i));
+        }
+        for (i32 type = 1; type <= 4; ++type) {
+            CHECK(sig::dct(x.as_ref(), y.as_mut_ref(), type) == sig::SignalStatus::kOk);
+            CHECK(sig::idct(y.as_ref(), z.as_mut_ref(), type) == sig::SignalStatus::kOk);
+            for (usize i = 0; i < len; ++i) {
+                CHECK_NEAR(z[i], x[i], 1e-11);
+            }
+        }
+    }
+
+    // FWHT roundtrip across all 3 orderings
+    const f64 fw_in[8] = {1.0, 2.0, -1.0, 4.0, 0.5, -2.5, 3.0, 1.5};
+    f64 fw_y[8]{}, fw_z[8]{};
+    for (sig::FwhtOrdering ord : {sig::FwhtOrdering::kSequency, sig::FwhtOrdering::kHadamard,
+                                  sig::FwhtOrdering::kDyadic}) {
+        CHECK(sig::fwht(fw_in, fw_y, ord) == sig::SignalStatus::kOk);
+        CHECK_NEAR(fw_y[0], 1.0625, 1e-12); // DC = mean(fw_in)
+        CHECK(sig::ifwht(fw_y, fw_z, ord) == sig::SignalStatus::kOk);
+        for (usize i = 0; i < 8; ++i) {
+            CHECK_NEAR(fw_z[i], fw_in[i], 1e-12);
+        }
+    }
+
+    // Hilbert analytic signal on non-power-of-2 cosine -> constant magnitude 1
+    constexpr usize HN = 60;
+    f64 hx[HN]{};
+    c64 hy[HN]{};
+    for (usize i = 0; i < HN; ++i) {
+        hx[i] = keel::cos(kTau * 5.0 * keel::as<f64>(i) / keel::as<f64>(HN));
+    }
+    CHECK(sig::hilbert(hx, hy) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < HN; ++i) {
+        CHECK_NEAR(hy[i].real(), hx[i], 1e-11);
+        CHECK_NEAR(keel::abs(hy[i]), 1.0, 1e-11);
+    }
+
+    // Envelope (analytic, FIR, RMS)
+    f64 up[HN]{}, lo[HN]{};
+    CHECK(sig::envelope_analytic(hx, up, lo) == sig::SignalStatus::kOk);
+    CHECK_NEAR(up[30], 1.0, 1e-10);
+    CHECK_NEAR(lo[30], -1.0, 1e-10);
+    CHECK(sig::envelope_fir(hx, 15, up, lo) == sig::SignalStatus::kOk);
+    CHECK(up[30] > 0.85 && up[30] < 1.15);
+    CHECK(sig::envelope_rms(hx, 12, up, lo) == sig::SignalStatus::kOk);
+    CHECK_NEAR(up[30], kInvSqrt2, 0.05);
+}
+
+void test_smoothing_and_findpeaks() {
+    // medfilt1 spike removal
+    const f64 mx[7] = {1.0, 1.0, 100.0, 1.0, -50.0, 1.0, 1.0};
+    f64 my[7]{};
+    CHECK(sig::medfilt1(mx, 3, false, my) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 7; ++i) {
+        CHECK_NEAR(my[i], 1.0, 1e-12);
+    }
+
+    // fillgaps on pure cosine with 3 missing samples
+    constexpr usize GN = 40;
+    f64 gx[GN]{}, gy[GN]{};
+    for (usize i = 0; i < GN; ++i) gx[i] = keel::cos(0.4 * keel::as<f64>(i));
+    gx[18] = Limits<f64>::quiet_nan();
+    gx[19] = Limits<f64>::quiet_nan();
+    gx[20] = Limits<f64>::quiet_nan();
+    CHECK(sig::fillgaps(gx, 0, 4, gy) == sig::SignalStatus::kOk);
+    for (usize i = 18; i <= 20; ++i) {
+        CHECK_NEAR(gy[i], keel::cos(0.4 * keel::as<f64>(i)), 1e-2);
+    }
+
+    // sgolay & sgolayfilt preserve exact quadratic polynomial
+    f64 sx[15]{}, sy[15]{};
+    for (usize i = 0; i < 15; ++i) {
+        const f64 t = keel::as<f64>(i);
+        sx[i] = 2.0 - 3.0 * t + 0.5 * t * t;
+    }
+    CHECK(sig::sgolayfilt(sx, 2, 7, sy) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 15; ++i) {
+        CHECK_NEAR(sy[i], sx[i], 1e-11);
+    }
+
+    // findpeaks with prominence & min distance
+    const f64 px[11] = {0.0, 1.0, 5.0, 2.0, 3.0, 1.0, 0.0, 2.0, 8.0, 1.0, 0.0};
+    sig::PeakOptions opts;
+    opts.use_min_prom = true;
+    opts.min_prom = 2.0;
+    sig::PeakResult pr;
+    CHECK(sig::findpeaks(px, {}, opts, pr) == sig::SignalStatus::kOk);
+    CHECK(pr.values.size() == 2);
+    CHECK_NEAR(pr.values[0], 5.0, 1e-12);
+    CHECK_NEAR(pr.locations[0], 3.0, 1e-12);
+    CHECK_NEAR(pr.values[1], 8.0, 1e-12);
+    CHECK_NEAR(pr.locations[1], 9.0, 1e-12);
+}
+
+void test_spectral_and_stft() {
+    // Periodogram & pwelch peak bin on tone at fs/8
+    constexpr usize N = 256;
+    const f64 fs = 256.0;
+    f64 x[N]{};
+    for (usize i = 0; i < N; ++i) {
+        x[i] = keel::cos(kTau * 32.0 * keel::as<f64>(i) / fs);
+    }
+    f64 pxx[N / 2 + 1]{}, freq[N / 2 + 1]{};
+    CHECK(sig::periodogram(x, {}, N, fs, pxx, freq) == sig::SignalStatus::kOk);
+    usize peak_bin = 0;
+    for (usize i = 1; i < N / 2 + 1; ++i) {
+        if (pxx[i] > pxx[peak_bin]) peak_bin = i;
+    }
+    CHECK(peak_bin == 32);
+    CHECK_NEAR(freq[32], 32.0, 1e-12);
+
+    // mscohere(x, 2*x) == 1 and tfestimate(x, 2*x) == 2
+    f64 y[N]{};
+    for (usize i = 0; i < N; ++i) y[i] = 2.0 * x[i];
+    f64 win[64]{};
+    sig::hamming(win);
+    f64 cxy[65]{}, cf[65]{};
+    c64 txy[65]{};
+    CHECK(sig::mscohere(x, y, win, 32, 128, fs, cxy, cf) == sig::SignalStatus::kOk);
+    CHECK_NEAR(cxy[16], 1.0, 1e-10);
+    CHECK(sig::tfestimate(x, y, win, 32, 128, fs, txy, cf) == sig::SignalStatus::kOk);
+    CHECK_NEAR(txy[16].real(), 2.0, 1e-10);
+    CHECK_NEAR(txy[16].imag(), 0.0, 1e-10);
+
+    // pyulear & pburg peak near w = 2*pi*32/256 = pi/4
+    f64 ar_p[129]{}, ar_f[129]{};
+    CHECK(sig::pburg(x, 4, 256, ar_p, ar_f) == sig::SignalStatus::kOk);
+    usize ar_peak = 0;
+    for (usize i = 1; i < 129; ++i) {
+        if (ar_p[i] > ar_p[ar_peak]) ar_peak = i;
+    }
+    CHECK(ar_peak >= 31 && ar_peak <= 33);
+
+    // STFT + ISTFT exact roundtrip with periodic Hann window & 75% overlap + iscola
+    f64 hann_p[64]{};
+    for (usize i = 0; i < 64; ++i) {
+        hann_p[i] = 0.5 * (1.0 - keel::cos(kTau * keel::as<f64>(i) / 64.0));
+    }
+    sig::ColaResult cola;
+    CHECK(sig::iscola(hann_p, 48, false, cola) == sig::SignalStatus::kOk);
+    CHECK(cola.is_cola);
+    CHECK_NEAR(cola.median, 2.0, 1e-12);
+
+    const usize n_frames = (N - 64) / 16 + 1;
+    keel::Array<c64> S(64 * n_frames, c64(0.0, 0.0));
+    CHECK(sig::stft(x, hann_p, 48, 64, sig::StftRange::kTwoSided, S.as_mut_ref()) ==
+          sig::SignalStatus::kOk);
+    f64 x_rec[N]{};
+    CHECK(sig::istft(S.as_ref(), 64, n_frames, hann_p, 48, 64, sig::StftRange::kTwoSided, x_rec) ==
+          sig::SignalStatus::kOk);
+    for (usize i = 32; i < N - 32; ++i) {
+        CHECK_NEAR(x_rec[i], x[i], 1e-12);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -317,6 +477,9 @@ int main() {
     test_conv();
     test_iir_and_sos();
     test_goertzel_and_unwrap();
+    test_dct_fwht_hilbert();
+    test_smoothing_and_findpeaks();
+    test_spectral_and_stft();
 
     if (g_failures == 0) {
         std::printf("ALL keel::signal TESTS PASSED\n");

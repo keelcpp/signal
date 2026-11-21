@@ -2,7 +2,12 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(keel)
+find_dependency(keel_fft)
 
 include("${CMAKE_CURRENT_LIST_DIR}/keel_signalTargets.cmake")
+
+if(TARGET keel::keel_signal AND NOT TARGET keel::signal)
+    add_library(keel::signal ALIAS keel::keel_signal)
+endif()
 
 check_required_components(keel_signal)

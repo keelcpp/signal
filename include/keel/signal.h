@@ -1,5 +1,6 @@
 #pragma once
 
+#include "keel/array.h"
 #include "keel/complex.h"
 #include "keel/core.h"
 #include "keel/math.h"
@@ -12,11 +13,35 @@ enum class SignalStatus : u8 {
     kOk = 0,
     kInvalidArgument,
     kZeroLeadingCoeff,
+    kSingular,
 };
 
 struct BiquadState {
     f64 s1 = 0.0;
     f64 s2 = 0.0;
+};
+
+enum class FwhtOrdering : u8 {
+    kSequency = 0,
+    kHadamard,
+    kDyadic,
+};
+
+enum class PeakWidthRef : u8 {
+    kHalfProm = 0,
+    kHalfHeight,
+};
+
+enum class PeakSort : u8 {
+    kNone = 0,
+    kAscend,
+    kDescend,
+};
+
+enum class StftRange : u8 {
+    kTwoSided = 0,
+    kOneSided,
+    kCentered,
 };
 
 // ============================================================================
@@ -116,7 +141,7 @@ void barthannwin(MutArrayRef<f64> out) noexcept;
                                                  Allocator* alloc = nullptr);
 
 // ============================================================================
-// Spectral & Phase Utilities
+// Transforms: Goertzel, Unwrap, DCT/IDCT, FWHT/IFWHT, Hilbert & Envelope
 // ============================================================================
 
 // Single-bin Goertzel DFT at 0-based (possibly fractional) bin index `k`.
@@ -128,5 +153,158 @@ void barthannwin(MutArrayRef<f64> out) noexcept;
 // Safe for in-place (`out.data() == phase.data()`). Requires `out.size() >= phase.size()`.
 [[nodiscard]] SignalStatus unwrap_phase(ArrayRef<f64> phase, MutArrayRef<f64> out,
                                         f64 period = kTau) noexcept;
+
+// Orthonormal 1-D Discrete Cosine Transform (Types 1, 2, 3, 4; default Type 2).
+// Types 2 & 3 use O(N log N) FFT acceleration for N >= 16.
+[[nodiscard]] SignalStatus dct(ArrayRef<f64> x, MutArrayRef<f64> out, i32 type = 2,
+                               Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus idct(ArrayRef<f64> x, MutArrayRef<f64> out, i32 type = 2,
+                                Allocator* alloc = nullptr);
+
+// Fast Walsh-Hadamard Transform (`out.size()` must be a power of 2; `x` is zero-padded/truncated).
+// Forward divides by `out.size()`; inverse does not scale.
+[[nodiscard]] SignalStatus fwht(ArrayRef<f64> x, MutArrayRef<f64> out,
+                                FwhtOrdering ordering = FwhtOrdering::kSequency,
+                                Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus ifwht(ArrayRef<f64> x, MutArrayRef<f64> out,
+                                 FwhtOrdering ordering = FwhtOrdering::kSequency,
+                                 Allocator* alloc = nullptr);
+
+// Exact length-N analytic signal via FFT (supports arbitrary N, power-of-2 and non-power-of-2).
+[[nodiscard]] SignalStatus hilbert(ArrayRef<f64> x, MutArrayRef<c64> out,
+                                   Allocator* alloc = nullptr);
+
+// Signal envelopes (upper = mean + amp, lower = mean - amp; `lower` may be empty if unused).
+[[nodiscard]] SignalStatus envelope_analytic(ArrayRef<f64> x, MutArrayRef<f64> upper,
+                                             MutArrayRef<f64> lower = {},
+                                             Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus envelope_fir(ArrayRef<f64> x, usize n_taps, MutArrayRef<f64> upper,
+                                        MutArrayRef<f64> lower = {}, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus envelope_rms(ArrayRef<f64> x, usize window_len, MutArrayRef<f64> upper,
+                                        MutArrayRef<f64> lower = {}) noexcept;
+
+// ============================================================================
+// Smoothing, Gap-Filling & Peak Detection
+// ============================================================================
+
+// Order-k 1-D sliding median filter (even k leans left; `zeropad` folds out-of-range zeros).
+[[nodiscard]] SignalStatus medfilt1(ArrayRef<f64> x, usize k, bool zeropad, MutArrayRef<f64> out,
+                                    Allocator* alloc = nullptr);
+
+// Forward-backward Burg AR gap interpolation across NaN runs (`maxlen == 0` unlimited, `order == 0` AIC).
+[[nodiscard]] SignalStatus fillgaps(ArrayRef<f64> x, usize maxlen, usize order,
+                                    MutArrayRef<f64> out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus fillgaps_c64(ArrayRef<c64> x, usize maxlen, usize order,
+                                        MutArrayRef<c64> out, Allocator* alloc = nullptr);
+
+// Savitzky-Golay projection matrix B (`framelen x framelen`, row-major) and optional
+// differentiation matrix G (`framelen x (order + 1)`, row-major; unweighted).
+// `weights` may be empty (unweighted) or length `framelen` positive weights.
+[[nodiscard]] SignalStatus sgolay(i32 order, i32 framelen, MutArrayRef<f64> b_rowmajor,
+                                  MutArrayRef<f64> g_rowmajor = {}, ArrayRef<f64> weights = {},
+                                  Allocator* alloc = nullptr);
+
+// 1-D Savitzky-Golay filter (`x.size() >= framelen`; handles edges via asymmetric rows of B).
+[[nodiscard]] SignalStatus sgolayfilt(ArrayRef<f64> x, i32 order, i32 framelen,
+                                      MutArrayRef<f64> out, ArrayRef<f64> weights = {},
+                                      Allocator* alloc = nullptr);
+
+struct PeakOptions {
+    f64 min_height = -Limits<f64>::infinity();
+    f64 threshold = 0.0;
+    bool use_min_prom = false;
+    f64 min_prom = 0.0;
+    bool use_width_filter = false;
+    f64 min_width = 0.0;
+    f64 max_width = Limits<f64>::infinity();
+    bool use_min_dist = false;
+    f64 min_dist = 0.0;
+    i32 max_peaks = -1; // < 0 means unlimited
+    PeakSort sort_mode = PeakSort::kNone;
+    PeakWidthRef width_ref = PeakWidthRef::kHalfProm;
+};
+
+struct PeakResult {
+    Array<f64> values;
+    Array<f64> locations;
+    Array<f64> widths;
+    Array<f64> prominences;
+};
+
+// Strict local-maxima finder with prominence, width, distance, sorting, and NPeaks filtering.
+// `locations` may be empty (defaults to 1-based sample indices `1..x.size()`).
+[[nodiscard]] SignalStatus findpeaks(ArrayRef<f64> x, ArrayRef<f64> locations,
+                                     const PeakOptions& opts, PeakResult& out,
+                                     Allocator* alloc = nullptr);
+
+// ============================================================================
+// Spectral Estimation & Time-Frequency Analysis
+// ============================================================================
+
+// Periodogram PSD estimate. If `window` is empty, uses rectangular window.
+// Real: one-sided (`nfft / 2 + 1` bins); complex: two-sided (`nfft` bins).
+[[nodiscard]] SignalStatus periodogram(ArrayRef<f64> x, ArrayRef<f64> window, usize nfft, f64 fs,
+                                       MutArrayRef<f64> pxx_out, MutArrayRef<f64> freq_out,
+                                       Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus periodogram_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize nfft,
+                                           f64 fs, MutArrayRef<f64> pxx_out,
+                                           MutArrayRef<f64> freq_out, Allocator* alloc = nullptr);
+
+// Welch overlapped-segment PSD estimate (requires non-empty `window`, `noverlap < window.size()`).
+[[nodiscard]] SignalStatus pwelch(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, usize nfft,
+                                  f64 fs, MutArrayRef<f64> pxx_out, MutArrayRef<f64> freq_out,
+                                  Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus pwelch_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize noverlap,
+                                      usize nfft, f64 fs, MutArrayRef<f64> pxx_out,
+                                      MutArrayRef<f64> freq_out, Allocator* alloc = nullptr);
+
+// Cross-spectral Welch estimators (real inputs of equal length; one-sided `nfft / 2 + 1` bins).
+[[nodiscard]] SignalStatus cpsd(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window,
+                                usize noverlap, usize nfft, f64 fs, MutArrayRef<c64> pxy_out,
+                                MutArrayRef<f64> freq_out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus mscohere(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window,
+                                    usize noverlap, usize nfft, f64 fs, MutArrayRef<f64> cxy_out,
+                                    MutArrayRef<f64> freq_out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus tfestimate(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window,
+                                      usize noverlap, usize nfft, f64 fs, MutArrayRef<c64> txy_out,
+                                      MutArrayRef<f64> freq_out, Allocator* alloc = nullptr);
+
+// Parametric AR PSD estimators: Yule-Walker (`pyulear`) and Burg (`pburg`).
+// One-sided normalized angular frequency grid `w in [0, pi]` (`nfft / 2 + 1` bins).
+[[nodiscard]] SignalStatus pyulear(ArrayRef<f64> x, usize order, usize nfft,
+                                   MutArrayRef<f64> pxx_out, MutArrayRef<f64> freq_out,
+                                   Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus pburg(ArrayRef<f64> x, usize order, usize nfft, MutArrayRef<f64> pxx_out,
+                                 MutArrayRef<f64> freq_out, Allocator* alloc = nullptr);
+
+// One-sided STFT spectrogram (`s_colmajor` is `(nfft/2+1) x n_segments`, column-major).
+// `freq_out` has length `nfft/2+1` in `[0, pi]`; `time_out` has length `n_segments` (sample centers).
+[[nodiscard]] SignalStatus spectrogram(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap,
+                                       usize nfft, MutArrayRef<c64> s_colmajor,
+                                       MutArrayRef<f64> freq_out, MutArrayRef<f64> time_out,
+                                       Allocator* alloc = nullptr);
+
+// Short-Time Fourier Transform (`s_colmajor` is `out_rows x n_frames`, column-major).
+[[nodiscard]] SignalStatus stft(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, usize nfft,
+                                StftRange range, MutArrayRef<c64> s_colmajor,
+                                Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus stft_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize noverlap,
+                                    usize nfft, StftRange range, MutArrayRef<c64> s_colmajor,
+                                    Allocator* alloc = nullptr);
+
+// Inverse STFT via weighted overlap-add (`x_out` length `(n_frames - 1) * (M - noverlap) + M`).
+[[nodiscard]] SignalStatus istft(ArrayRef<c64> s_colmajor, usize in_rows, usize n_frames,
+                                 ArrayRef<f64> window, usize noverlap, usize nfft, StftRange range,
+                                 MutArrayRef<f64> x_out, Allocator* alloc = nullptr);
+
+struct ColaResult {
+    bool is_cola = false;
+    f64 median = 0.0;
+    f64 max_dev = 0.0;
+};
+
+// Constant Overlap-Add compliance check (`wola = true` checks sum(w^2), `false` checks sum(w)).
+[[nodiscard]] SignalStatus iscola(ArrayRef<f64> window, usize noverlap, bool wola, ColaResult& out,
+                                  Allocator* alloc = nullptr);
 
 } // namespace keel::signal
