@@ -431,4 +431,39 @@ struct KaiserOrdResult {
 [[nodiscard]] SignalStatus fftfilt_c64(ArrayRef<c64> b, ArrayRef<c64> x, usize nfft,
                                        MutArrayRef<c64> out, Allocator* alloc = nullptr);
 
+// ============================================================================
+// FIR Filter Design (fir1 / fir2 / firls / firpm Parks-McClellan)
+// ============================================================================
+
+enum class FirFtype : u8 {
+    kStandard = 0,
+    kHilbert,
+    kDifferentiator,
+};
+
+// Windowed-sinc single-cutoff lowpass/highpass FIR (Hamming window, length `order + 1`).
+[[nodiscard]] SignalStatus fir1_single(i32 order, f64 wn, bool highpass,
+                                       MutArrayRef<f64> out_b) noexcept;
+
+// General multi-band windowed-sinc FIR (`window` empty => Hamming, odd-order Nyquist bump).
+[[nodiscard]] SignalStatus fir1_multiband(i32 order, ArrayRef<f64> wn, bool first_band_pass,
+                                          ArrayRef<f64> window, bool scale, Array<f64>& out_b,
+                                          Allocator* alloc = nullptr);
+
+// Frequency-sampling FIR filter design (`npt <= 0` default 512, `lap <= 0` default npt/25).
+[[nodiscard]] SignalStatus fir2(i32 order, ArrayRef<f64> f, ArrayRef<f64> m, i32 npt, i32 lap,
+                                ArrayRef<f64> window, Array<f64>& out_b,
+                                Allocator* alloc = nullptr);
+
+// Least-squares linear-phase FIR design (Types I-IV, `w` empty => unit weights).
+[[nodiscard]] SignalStatus firls(i32 order, ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> w,
+                                 FirFtype ftype, MutArrayRef<f64> out_b,
+                                 Allocator* alloc = nullptr);
+
+// Parks-McClellan equiripple FIR design via Remez exchange (Types I-IV).
+// Writes length `order + 1` impulse response into `out_b` and peak ripple magnitude to `out_err`.
+[[nodiscard]] SignalStatus firpm(i32 order, ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> w,
+                                 FirFtype ftype, MutArrayRef<f64> out_b, f64& out_err,
+                                 Allocator* alloc = nullptr);
+
 } // namespace keel::signal

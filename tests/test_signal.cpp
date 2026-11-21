@@ -633,6 +633,63 @@ void test_multirate() {
     }
 }
 
+void test_fir_design() {
+    // 1. fir1_single lowpass DC gain == 1 and symmetry
+    f64 h1[21]{};
+    CHECK(sig::fir1_single(20, 0.4, false, h1) == sig::SignalStatus::kOk);
+    f64 sum1 = 0.0;
+    for (usize i = 0; i < 21; ++i) sum1 += h1[i];
+    CHECK_NEAR(sum1, 1.0, 1e-12);
+    CHECK_NEAR(h1[0], h1[20], 1e-12);
+
+    // fir1_multiband bandpass
+    const f64 wn_bp[2] = {0.2, 0.6};
+    keel::Array<f64> h_bp;
+    CHECK(sig::fir1_multiband(24, wn_bp, false, {}, true, h_bp) == sig::SignalStatus::kOk);
+    CHECK(h_bp.size() == 25);
+    CHECK_NEAR(h_bp[0], h_bp[24], 1e-12);
+
+    // 2. fir2 lowpass
+    const f64 f2[4] = {0.0, 0.4, 0.4, 1.0};
+    const f64 m2[4] = {1.0, 1.0, 0.0, 0.0};
+    keel::Array<f64> h2;
+    CHECK(sig::fir2(30, f2, m2, 0, 0, {}, h2) == sig::SignalStatus::kOk);
+    CHECK(h2.size() == 31);
+    f64 dc2 = 0.0;
+    for (usize i = 0; i < h2.size(); ++i) dc2 += h2[i];
+    CHECK_NEAR(dc2, 1.0, 0.05);
+
+    // 3. firls Type I lowpass
+    const f64 fls[4] = {0.0, 0.3, 0.4, 1.0};
+    const f64 als[4] = {1.0, 1.0, 0.0, 0.0};
+    f64 hls[21]{};
+    CHECK(sig::firls(20, fls, als, {}, sig::FirFtype::kStandard, hls) == sig::SignalStatus::kOk);
+    CHECK_NEAR(hls[0], hls[20], 1e-12);
+    f64 dcls = 0.0;
+    for (usize i = 0; i < 21; ++i) dcls += hls[i];
+    CHECK_NEAR(dcls, 1.0, 0.05);
+
+    // 4. firpm Type I lowpass & Type IV differentiator
+    f64 hpm[21]{};
+    f64 err = 0.0;
+    CHECK(sig::firpm(20, fls, als, {}, sig::FirFtype::kStandard, hpm, err) ==
+          sig::SignalStatus::kOk);
+    CHECK(err > 0.0 && err < 0.15);
+    CHECK_NEAR(hpm[0], hpm[20], 1e-12);
+    f64 hpm40[41]{};
+    f64 err40 = 0.0;
+    CHECK(sig::firpm(40, fls, als, {}, sig::FirFtype::kStandard, hpm40, err40) ==
+          sig::SignalStatus::kOk);
+    CHECK(err40 > 0.0 && err40 < err);
+
+    const f64 fdiff[2] = {0.1, 0.9};
+    const f64 adiff[2] = {0.1, 0.9};
+    f64 hdiff[16]{};
+    CHECK(sig::firpm(15, fdiff, adiff, {}, sig::FirFtype::kDifferentiator, hdiff, err) ==
+          sig::SignalStatus::kOk);
+    CHECK_NEAR(hdiff[0], -hdiff[15], 1e-12);
+}
+
 } // namespace
 
 int main() {
@@ -645,6 +702,7 @@ int main() {
     test_spectral_and_stft();
     test_iir_design();
     test_multirate();
+    test_fir_design();
 
     if (g_failures == 0) {
         std::printf("ALL keel::signal TESTS PASSED\n");

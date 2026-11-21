@@ -82,6 +82,7 @@ add_library(keel_signal STATIC
     src/spectral.cpp
     src/iir_design.cpp
     src/multirate.cpp
+    src/fir_design.cpp
 )
 add_library(keel::signal ALIAS keel_signal)
 
