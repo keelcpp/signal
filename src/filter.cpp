@@ -8,15 +8,16 @@ namespace keel::signal {
 
 namespace {
 
-void copy_f64(f64* dst, const f64* src, usize n) noexcept {
+void copy_f64(MutArrayRef<f64> dst, ArrayRef<f64> src) noexcept {
+    const usize n = src.size();
     for (usize i = 0; i < n; ++i) {
         dst[i] = src[i];
     }
 }
 
-void reverse_f64(f64* data, usize n) noexcept {
+void reverse_f64(MutArrayRef<f64> data) noexcept {
     usize lo = 0;
-    usize hi = n;
+    usize hi = data.size();
     while (lo + 1 < hi) {
         --hi;
         keel::swap(data[lo], data[hi]);
@@ -24,10 +25,15 @@ void reverse_f64(f64* data, usize n) noexcept {
     }
 }
 
-SignalStatus apply_sos_cascade(const f64* sos, usize num_sections, const f64* src, f64* dst,
-                               usize n, f64* scratch_buf, const f64* zi) noexcept {
-    const f64* current_src = src;
-    f64* current_dst = dst;
+SignalStatus apply_sos_cascade(ArrayRef<f64> sos, usize num_sections, ArrayRef<f64> src,
+                               MutArrayRef<f64> dst, MutArrayRef<f64> scratch_buf,
+                               ArrayRef<f64> zi) noexcept {
+    const usize n = src.size();
+    ArrayRef<f64> current_src = src;
+    MutArrayRef<f64> current_dst = dst.slice(0, n);
+    MutArrayRef<f64> scratch_view = scratch_buf.slice(0, n);
+    const bool has_zi = !zi.empty();
+
     for (usize s = 0; s < num_sections; ++s) {
         const f64 a0 = sos[3 * num_sections + s];
         if (a0 == 0.0) {
@@ -39,45 +45,54 @@ SignalStatus apply_sos_cascade(const f64* sos, usize num_sections, const f64* sr
         const f64 a1 = sos[4 * num_sections + s] / a0;
         const f64 a2 = sos[5 * num_sections + s] / a0;
 
-        if (zi) {
-            biquad_df2t_state(b0, b1, b2, a1, a2, current_src, current_dst, n, zi[2 * s + 0],
-                              zi[2 * s + 1]);
+        SignalStatus st = SignalStatus::kOk;
+        if (has_zi) {
+            st = biquad_df2t_state(b0, b1, b2, a1, a2, current_src, current_dst, zi[2 * s + 0],
+                                   zi[2 * s + 1]);
         } else {
-            biquad_df2t(b0, b1, b2, a1, a2, current_src, current_dst, n);
+            st = biquad_df2t(b0, b1, b2, a1, a2, current_src, current_dst);
         }
+        if (st != SignalStatus::kOk) return st;
 
         if (s + 1 < num_sections) {
-            if (current_dst == dst) {
-                current_src = dst;
-                current_dst = scratch_buf;
+            if (current_dst.data() == dst.data()) {
+                current_src = dst.slice(0, n);
+                current_dst = scratch_view;
             } else {
-                current_src = scratch_buf;
-                current_dst = dst;
+                current_src = scratch_view;
+                current_dst = dst.slice(0, n);
             }
         }
     }
-    if (current_dst != dst) {
-        copy_f64(dst, scratch_buf, n);
+    if (current_dst.data() != dst.data()) {
+        copy_f64(dst, scratch_view);
     }
     return SignalStatus::kOk;
 }
 
 } // namespace
 
-void filter_df2t(const f64* b, usize nb, const f64* a, usize na, const f64* x, usize len, f64* y,
-                 const f64* zi, usize zi_len, f64* zf, Allocator* alloc) {
+SignalStatus filter_df2t(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> x, MutArrayRef<f64> y,
+                         ArrayRef<f64> zi, MutArrayRef<f64> zf, Allocator* alloc) {
+    const usize len = x.size();
+    if (y.size() < len) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize nb = b.size();
+    const usize na = a.size();
     const usize nfilt = keel::max(nb, na);
     if (nfilt == 0) {
         for (usize n = 0; n < len; ++n) {
             y[n] = 0.0;
         }
-        return;
+        return SignalStatus::kOk;
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
     Array<f64> z(nfilt, 0.0, scratch.allocator());
+    const usize zi_len = zi.size();
     for (usize i = 0; i < nfilt; ++i) {
-        z[i] = (zi && i < zi_len) ? zi[i] : 0.0;
+        z[i] = (i < zi_len) ? zi[i] : 0.0;
     }
     for (usize n = 0; n < len; ++n) {
         const f64 xn = x[n];
@@ -88,28 +103,37 @@ void filter_df2t(const f64* b, usize nb, const f64* a, usize na, const f64* x, u
                        (i < nfilt - 1 ? z[i] : 0.0);
         }
     }
-    if (zf) {
-        for (usize i = 0; i + 1 < nfilt; ++i) {
+    if (!zf.empty() && nfilt > 1) {
+        const usize count = keel::min(zf.size(), nfilt - 1);
+        for (usize i = 0; i < count; ++i) {
             zf[i] = z[i];
         }
     }
+    return SignalStatus::kOk;
 }
 
-void filter_df2t_c64(const c64* b, usize nb, const c64* a, usize na, const c64* x, usize len,
-                     c64* y, const c64* zi, usize zi_len, c64* zf, Allocator* alloc) {
+SignalStatus filter_df2t_c64(ArrayRef<c64> b, ArrayRef<c64> a, ArrayRef<c64> x, MutArrayRef<c64> y,
+                             ArrayRef<c64> zi, MutArrayRef<c64> zf, Allocator* alloc) {
+    const usize len = x.size();
+    if (y.size() < len) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize nb = b.size();
+    const usize na = a.size();
     const usize nfilt = keel::max(nb, na);
     const c64 zero(0.0, 0.0);
     if (nfilt == 0) {
         for (usize n = 0; n < len; ++n) {
             y[n] = zero;
         }
-        return;
+        return SignalStatus::kOk;
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
     Array<c64> z(nfilt, zero, scratch.allocator());
+    const usize zi_len = zi.size();
     for (usize i = 0; i < nfilt; ++i) {
-        z[i] = (zi && i < zi_len) ? zi[i] : zero;
+        z[i] = (i < zi_len) ? zi[i] : zero;
     }
     for (usize n = 0; n < len; ++n) {
         const c64 xn = x[n];
@@ -120,14 +144,21 @@ void filter_df2t_c64(const c64* b, usize nb, const c64* a, usize na, const c64* 
                        (i < nfilt - 1 ? z[i] : zero);
         }
     }
-    if (zf) {
-        for (usize i = 0; i + 1 < nfilt; ++i) {
+    if (!zf.empty() && nfilt > 1) {
+        const usize count = keel::min(zf.size(), nfilt - 1);
+        for (usize i = 0; i < count; ++i) {
             zf[i] = z[i];
         }
     }
+    return SignalStatus::kOk;
 }
 
-void biquad_df2t(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, const f64* x, f64* y, usize n) noexcept {
+SignalStatus biquad_df2t(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, ArrayRef<f64> x,
+                         MutArrayRef<f64> y) noexcept {
+    const usize n = x.size();
+    if (y.size() < n) {
+        return SignalStatus::kInvalidArgument;
+    }
     f64 s1 = 0.0;
     f64 s2 = 0.0;
     for (usize i = 0; i < n; ++i) {
@@ -137,10 +168,16 @@ void biquad_df2t(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, const f64* x, f64* y, u
         s2 = b2 * xi - a2 * yi;
         y[i] = yi;
     }
+    return SignalStatus::kOk;
 }
 
-void biquad_df2t_state(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, const f64* x, f64* y, usize n,
-                       f64 s1_init, f64 s2_init, BiquadState* final_state) noexcept {
+SignalStatus biquad_df2t_state(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, ArrayRef<f64> x,
+                               MutArrayRef<f64> y, f64 s1_init, f64 s2_init,
+                               BiquadState* final_state) noexcept {
+    const usize n = x.size();
+    if (y.size() < n) {
+        return SignalStatus::kInvalidArgument;
+    }
     f64 s1 = s1_init;
     f64 s2 = s2_init;
     for (usize i = 0; i < n; ++i) {
@@ -154,6 +191,7 @@ void biquad_df2t_state(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, const f64* x, f64
         final_state->s1 = s1;
         final_state->s2 = s2;
     }
+    return SignalStatus::kOk;
 }
 
 BiquadState biquad_zi(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2) noexcept {
@@ -166,40 +204,45 @@ BiquadState biquad_zi(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2) noexcept {
     return BiquadState{s1, s2};
 }
 
-SignalStatus sosfilt_col_major(const f64* sos, usize num_sections, const f64* x, f64* y, usize n,
-                               const f64* zi, Allocator* alloc) {
+SignalStatus sosfilt_col_major(ArrayRef<f64> sos, usize num_sections, ArrayRef<f64> x,
+                               MutArrayRef<f64> y, ArrayRef<f64> zi, Allocator* alloc) {
+    const usize n = x.size();
+    if (y.size() < n) {
+        return SignalStatus::kInvalidArgument;
+    }
     if (n == 0) {
         return SignalStatus::kOk;
     }
-    if (!x || !y) {
-        return SignalStatus::kInvalidArgument;
-    }
     if (num_sections == 0) {
-        copy_f64(y, x, n);
+        copy_f64(y, x);
         return SignalStatus::kOk;
     }
-    if (!sos) {
+    if (sos.size() < 6 * num_sections) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (!zi.empty() && zi.size() < 2 * num_sections) {
         return SignalStatus::kInvalidArgument;
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
     Array<f64> buf(n, scratch.allocator());
-    return apply_sos_cascade(sos, num_sections, x, y, n, buf.data(), zi);
+    return apply_sos_cascade(sos, num_sections, x, y, buf, zi);
 }
 
-SignalStatus sosfiltfilt_col_major(const f64* sos, usize num_sections, const f64* x, f64* y,
-                                   usize n, Allocator* alloc) {
+SignalStatus sosfiltfilt_col_major(ArrayRef<f64> sos, usize num_sections, ArrayRef<f64> x,
+                                   MutArrayRef<f64> y, Allocator* alloc) {
+    const usize n = x.size();
+    if (y.size() < n) {
+        return SignalStatus::kInvalidArgument;
+    }
     if (n == 0) {
         return SignalStatus::kOk;
     }
-    if (!x || !y) {
-        return SignalStatus::kInvalidArgument;
-    }
     if (num_sections == 0) {
-        copy_f64(y, x, n);
+        copy_f64(y, x);
         return SignalStatus::kOk;
     }
-    if (!sos) {
+    if (sos.size() < 6 * num_sections) {
         return SignalStatus::kInvalidArgument;
     }
 
@@ -237,7 +280,7 @@ SignalStatus sosfiltfilt_col_major(const f64* sos, usize num_sections, const f64
     for (usize i = 0; i < edge; ++i) {
         ext[i] = 2.0 * x[0] - x[edge - i];
     }
-    copy_f64(ext.data() + edge, x, n);
+    copy_f64(MutArrayRef<f64>(ext).slice(edge, n), x);
     for (usize i = 0; i < edge; ++i) {
         ext[edge + n + i] = 2.0 * x[n - 1] - x[n - 2 - i];
     }
@@ -257,18 +300,16 @@ SignalStatus sosfiltfilt_col_major(const f64* sos, usize num_sections, const f64
     };
 
     scale_zi(ext[0]);
-    SignalStatus st = apply_sos_cascade(sos, num_sections, ext.data(), fwd.data(), ext_len,
-                                        cascade_scratch.data(), zi_scaled.data());
+    SignalStatus st = apply_sos_cascade(sos, num_sections, ext, fwd, cascade_scratch, zi_scaled);
     if (st != SignalStatus::kOk) return st;
 
-    reverse_f64(fwd.data(), ext_len);
+    reverse_f64(fwd);
     scale_zi(fwd[0]);
-    st = apply_sos_cascade(sos, num_sections, fwd.data(), bwd.data(), ext_len,
-                           cascade_scratch.data(), zi_scaled.data());
+    st = apply_sos_cascade(sos, num_sections, fwd, bwd, cascade_scratch, zi_scaled);
     if (st != SignalStatus::kOk) return st;
 
-    reverse_f64(bwd.data(), ext_len);
-    copy_f64(y, bwd.data() + edge, n);
+    reverse_f64(bwd);
+    copy_f64(y, ArrayRef<f64>(bwd).slice(edge, n));
     return SignalStatus::kOk;
 }
 

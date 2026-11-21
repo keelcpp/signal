@@ -25,15 +25,16 @@ namespace {
 
 } // namespace
 
-void rectwin(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void rectwin(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
     for (usize i = 0; i < n; ++i) {
         out[i] = 1.0;
     }
 }
 
-void hann(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void hann(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -44,8 +45,9 @@ void hann(usize n, f64* out) noexcept {
     }
 }
 
-void hamming(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void hamming(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -56,8 +58,9 @@ void hamming(usize n, f64* out) noexcept {
     }
 }
 
-void blackman(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void blackman(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -69,8 +72,9 @@ void blackman(usize n, f64* out) noexcept {
     }
 }
 
-void bartlett(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void bartlett(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -81,8 +85,9 @@ void bartlett(usize n, f64* out) noexcept {
     }
 }
 
-void triang(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void triang(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -102,8 +107,9 @@ void triang(usize n, f64* out) noexcept {
     }
 }
 
-void kaiser(usize n, f64 beta, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void kaiser(MutArrayRef<f64> out, f64 beta) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -117,8 +123,9 @@ void kaiser(usize n, f64 beta, f64* out) noexcept {
     }
 }
 
-void tukeywin(usize n, f64 r, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void tukeywin(MutArrayRef<f64> out, f64 r) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (r < 0.0) r = 0.0;
     if (r > 1.0) r = 1.0;
     if (n == 1) {
@@ -145,8 +152,9 @@ void tukeywin(usize n, f64 r, f64* out) noexcept {
     }
 }
 
-void flattopwin(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void flattopwin(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -164,8 +172,9 @@ void flattopwin(usize n, f64* out) noexcept {
     }
 }
 
-void parzenwin(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void parzenwin(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -184,8 +193,9 @@ void parzenwin(usize n, f64* out) noexcept {
     }
 }
 
-void nuttallwin(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void nuttallwin(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -201,8 +211,9 @@ void nuttallwin(usize n, f64* out) noexcept {
     }
 }
 
-void blackmanharris(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void blackmanharris(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -218,8 +229,9 @@ void blackmanharris(usize n, f64* out) noexcept {
     }
 }
 
-void bohmanwin(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void bohmanwin(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -235,8 +247,9 @@ void bohmanwin(usize n, f64* out) noexcept {
     }
 }
 
-void barthannwin(usize n, f64* out) noexcept {
-    if (n == 0 || !out) return;
+void barthannwin(MutArrayRef<f64> out) noexcept {
+    const usize n = out.size();
+    if (n == 0) return;
     if (n == 1) {
         out[0] = 1.0;
         return;
@@ -248,15 +261,13 @@ void barthannwin(usize n, f64* out) noexcept {
     }
 }
 
-SignalStatus gausswin(usize n, f64 alpha, f64* out) noexcept {
+SignalStatus gausswin(MutArrayRef<f64> out, f64 alpha) noexcept {
     if (alpha <= 0.0) {
         return SignalStatus::kInvalidArgument;
     }
+    const usize n = out.size();
     if (n == 0) {
         return SignalStatus::kOk;
-    }
-    if (!out) {
-        return SignalStatus::kInvalidArgument;
     }
     if (n == 1) {
         out[0] = 1.0;
@@ -270,15 +281,13 @@ SignalStatus gausswin(usize n, f64 alpha, f64* out) noexcept {
     return SignalStatus::kOk;
 }
 
-SignalStatus chebwin(usize n, f64 at_db, f64* out, Allocator* alloc) {
+SignalStatus chebwin(MutArrayRef<f64> out, f64 at_db, Allocator* alloc) {
     if (at_db <= 0.0) {
         return SignalStatus::kInvalidArgument;
     }
+    const usize n = out.size();
     if (n == 0) {
         return SignalStatus::kOk;
-    }
-    if (!out) {
-        return SignalStatus::kInvalidArgument;
     }
     if (n == 1) {
         out[0] = 1.0;
@@ -332,15 +341,13 @@ SignalStatus chebwin(usize n, f64 at_db, f64* out, Allocator* alloc) {
     return SignalStatus::kOk;
 }
 
-SignalStatus taylorwin(usize n, i32 nbar, f64 sll_db, f64* out, Allocator* alloc) {
+SignalStatus taylorwin(MutArrayRef<f64> out, i32 nbar, f64 sll_db, Allocator* alloc) {
     if (sll_db >= 0.0 || nbar < 2) {
         return SignalStatus::kInvalidArgument;
     }
+    const usize n = out.size();
     if (n == 0) {
         return SignalStatus::kOk;
-    }
-    if (!out) {
-        return SignalStatus::kInvalidArgument;
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
@@ -382,14 +389,16 @@ SignalStatus taylorwin(usize n, i32 nbar, f64 sll_db, f64* out, Allocator* alloc
     return SignalStatus::kOk;
 }
 
-SignalStatus dpss(usize n, f64 nw, usize k, f64* tapers_col_major, f64* ratios, Allocator* alloc) {
+SignalStatus dpss(usize n, f64 nw, MutArrayRef<f64> tapers_col_major, MutArrayRef<f64> ratios,
+                  Allocator* alloc) {
+    usize k = ratios.size();
     if (n == 0 || k == 0) {
         return SignalStatus::kOk;
     }
-    if (!tapers_col_major || !ratios) {
+    if (k > n) k = n;
+    if (tapers_col_major.size() < n * k) {
         return SignalStatus::kInvalidArgument;
     }
-    if (k > n) k = n;
 
     ArenaTemp scratch = keel::get_scratch(alloc);
     const f64 w = nw / static_cast<f64>(n);
@@ -482,7 +491,7 @@ SignalStatus dpss(usize n, f64 nw, usize k, f64* tapers_col_major, f64* ratios, 
             }
         }
         const f64 sign = (pol < 0.0) ? -1.0 : 1.0;
-        f64* dst_col = tapers_col_major + j * n;
+        MutArrayRef<f64> dst_col = tapers_col_major.slice(j * n, n);
         for (usize idx = 0; idx < n; ++idx) {
             dst_col[idx] = sign * col[idx];
         }

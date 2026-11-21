@@ -4,8 +4,9 @@
 
 namespace keel::signal {
 
-c64 goertzel_bin(const f64* x, usize n, f64 k_zero_based) noexcept {
-    if (n == 0 || !x) {
+c64 goertzel_bin(ArrayRef<f64> x, f64 k_zero_based) noexcept {
+    const usize n = x.size();
+    if (n == 0) {
         return c64(0.0, 0.0);
     }
     const f64 w = kTau * k_zero_based / static_cast<f64>(n);
@@ -28,8 +29,9 @@ c64 goertzel_bin(const f64* x, usize n, f64 k_zero_based) noexcept {
     return c64(y_re * pcw + y_im * psw, y_im * pcw - y_re * psw);
 }
 
-c64 goertzel_bin_c64(const c64* x, usize n, f64 k_zero_based) noexcept {
-    if (n == 0 || !x) {
+c64 goertzel_bin_c64(ArrayRef<c64> x, f64 k_zero_based) noexcept {
+    const usize n = x.size();
+    if (n == 0) {
         return c64(0.0, 0.0);
     }
     const f64 w = kTau * k_zero_based / static_cast<f64>(n);
@@ -51,13 +53,19 @@ c64 goertzel_bin_c64(const c64* x, usize n, f64 k_zero_based) noexcept {
     return y * c64(pcw, -psw);
 }
 
-void unwrap_phase(const f64* phase, usize n, f64* out, f64 period) noexcept {
-    if (n == 0 || !phase || !out) return;
+SignalStatus unwrap_phase(ArrayRef<f64> phase, MutArrayRef<f64> out, f64 period) noexcept {
+    const usize n = phase.size();
+    if (out.size() < n) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (n == 0) {
+        return SignalStatus::kOk;
+    }
     if (period <= 0.0) {
         for (usize i = 0; i < n; ++i) {
             out[i] = phase[i];
         }
-        return;
+        return SignalStatus::kOk;
     }
     f64 prev_in = phase[0];
     f64 prev_out = prev_in;
@@ -70,6 +78,7 @@ void unwrap_phase(const f64* phase, usize n, f64* out, f64 period) noexcept {
         out[i] = prev_out;
         prev_in = cur_in;
     }
+    return SignalStatus::kOk;
 }
 
 } // namespace keel::signal

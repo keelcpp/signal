@@ -2,9 +2,16 @@
 
 namespace keel::signal {
 
-void conv_1d(const f64* a, usize na, const f64* b, usize nb, f64* out) noexcept {
-    if (na == 0 || nb == 0 || !a || !b || !out) return;
+SignalStatus conv_1d(ArrayRef<f64> a, ArrayRef<f64> b, MutArrayRef<f64> out) noexcept {
+    const usize na = a.size();
+    const usize nb = b.size();
+    if (na == 0 || nb == 0) {
+        return SignalStatus::kOk;
+    }
     const usize nc = na + nb - 1;
+    if (out.size() < nc) {
+        return SignalStatus::kInvalidArgument;
+    }
     for (usize k = 0; k < nc; ++k) {
         out[k] = 0.0;
     }
@@ -14,13 +21,20 @@ void conv_1d(const f64* a, usize na, const f64* b, usize nb, f64* out) noexcept 
             out[i + j] += ai * b[j];
         }
     }
+    return SignalStatus::kOk;
 }
 
-void conv_2d(const f64* a, usize m, usize n, const f64* b, usize p, usize q, f64* out) noexcept {
-    if (m == 0 || n == 0 || p == 0 || q == 0 || !a || !b || !out) return;
+SignalStatus conv_2d(ArrayRef<f64> a, usize m, usize n, ArrayRef<f64> b, usize p, usize q,
+                     MutArrayRef<f64> out) noexcept {
+    if (m == 0 || n == 0 || p == 0 || q == 0) {
+        return SignalStatus::kOk;
+    }
     const usize out_r = m + p - 1;
     const usize out_c = n + q - 1;
     const usize total = out_r * out_c;
+    if (a.size() < m * n || b.size() < p * q || out.size() < total) {
+        return SignalStatus::kInvalidArgument;
+    }
     for (usize idx = 0; idx < total; ++idx) {
         out[idx] = 0.0;
     }
@@ -36,6 +50,7 @@ void conv_2d(const f64* a, usize m, usize n, const f64* b, usize p, usize q, f64
             }
         }
     }
+    return SignalStatus::kOk;
 }
 
 } // namespace keel::signal

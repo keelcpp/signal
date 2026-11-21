@@ -4,6 +4,7 @@
 #include "keel/core.h"
 #include "keel/math.h"
 #include "keel/memory.h"
+#include "keel/ref.h"
 
 namespace keel::signal {
 
@@ -21,51 +22,52 @@ struct BiquadState {
 // ============================================================================
 // Window Functions
 // ============================================================================
-// All window functions write `n` samples into `out` (no-op when `n == 0`).
+// All window functions populate `out` (`out.size()` samples; no-op when empty).
 
-void rectwin(usize n, f64* out) noexcept;
-void hann(usize n, f64* out) noexcept;
-void hamming(usize n, f64* out) noexcept;
-void blackman(usize n, f64* out) noexcept;
-void bartlett(usize n, f64* out) noexcept;
-void triang(usize n, f64* out) noexcept;
-void kaiser(usize n, f64 beta, f64* out) noexcept;
-void tukeywin(usize n, f64 r, f64* out) noexcept;
-void flattopwin(usize n, f64* out) noexcept;
-void parzenwin(usize n, f64* out) noexcept;
-void nuttallwin(usize n, f64* out) noexcept;
-void blackmanharris(usize n, f64* out) noexcept;
-void bohmanwin(usize n, f64* out) noexcept;
-void barthannwin(usize n, f64* out) noexcept;
+void rectwin(MutArrayRef<f64> out) noexcept;
+void hann(MutArrayRef<f64> out) noexcept;
+void hamming(MutArrayRef<f64> out) noexcept;
+void blackman(MutArrayRef<f64> out) noexcept;
+void bartlett(MutArrayRef<f64> out) noexcept;
+void triang(MutArrayRef<f64> out) noexcept;
+void kaiser(MutArrayRef<f64> out, f64 beta) noexcept;
+void tukeywin(MutArrayRef<f64> out, f64 r) noexcept;
+void flattopwin(MutArrayRef<f64> out) noexcept;
+void parzenwin(MutArrayRef<f64> out) noexcept;
+void nuttallwin(MutArrayRef<f64> out) noexcept;
+void blackmanharris(MutArrayRef<f64> out) noexcept;
+void bohmanwin(MutArrayRef<f64> out) noexcept;
+void barthannwin(MutArrayRef<f64> out) noexcept;
 
 // Gaussian window: returns kInvalidArgument if alpha <= 0.
-[[nodiscard]] SignalStatus gausswin(usize n, f64 alpha, f64* out) noexcept;
+[[nodiscard]] SignalStatus gausswin(MutArrayRef<f64> out, f64 alpha) noexcept;
 
 // Dolph-Chebyshev window with `at_db` dB sidelobe attenuation (> 0).
-[[nodiscard]] SignalStatus chebwin(usize n, f64 at_db, f64* out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus chebwin(MutArrayRef<f64> out, f64 at_db, Allocator* alloc = nullptr);
 
 // Taylor window: requires nbar >= 2 and sll_db < 0 (peak sidelobe in dB).
-[[nodiscard]] SignalStatus taylorwin(usize n, i32 nbar, f64 sll_db, f64* out,
+[[nodiscard]] SignalStatus taylorwin(MutArrayRef<f64> out, i32 nbar, f64 sll_db,
                                      Allocator* alloc = nullptr);
 
 // Discrete prolate spheroidal sequences (Slepian tapers).
-// Writes `k_eff = min(k, n)` column-major tapers (`n * k_eff` doubles) into
-// `tapers_col_major` and `k_eff` concentration ratios into `ratios`.
-[[nodiscard]] SignalStatus dpss(usize n, f64 nw, usize k, f64* tapers_col_major, f64* ratios,
-                                Allocator* alloc = nullptr);
+// Computes `k_eff = min(ratios.size(), n)` tapers of length `n`.
+// Requires `tapers_col_major.size() >= n * k_eff` (column-major `n x k_eff`).
+[[nodiscard]] SignalStatus dpss(usize n, f64 nw, MutArrayRef<f64> tapers_col_major,
+                                MutArrayRef<f64> ratios, Allocator* alloc = nullptr);
 
 // ============================================================================
 // Linear Convolution
 // ============================================================================
 
-// Direct 1D linear convolution. Writes `na + nb - 1` samples to `out`.
-// No-op if `na == 0 || nb == 0`.
-void conv_1d(const f64* a, usize na, const f64* b, usize nb, f64* out) noexcept;
+// Direct 1D linear convolution.
+// Requires `out.size() >= a.size() + b.size() - 1` when both inputs are non-empty.
+[[nodiscard]] SignalStatus conv_1d(ArrayRef<f64> a, ArrayRef<f64> b, MutArrayRef<f64> out) noexcept;
 
 // Direct 2D linear convolution (column-major `m x n` and `p x q`).
-// Writes `(m + p - 1) x (n + q - 1)` column-major doubles to `out`.
-// No-op if any dimension is 0.
-void conv_2d(const f64* a, usize m, usize n, const f64* b, usize p, usize q, f64* out) noexcept;
+// Requires `a.size() >= m * n`, `b.size() >= p * q`, and
+// `out.size() >= (m + p - 1) * (n + q - 1)` when all dimensions are non-zero.
+[[nodiscard]] SignalStatus conv_2d(ArrayRef<f64> a, usize m, usize n, ArrayRef<f64> b, usize p,
+                                   usize q, MutArrayRef<f64> out) noexcept;
 
 // ============================================================================
 // IIR, Biquad & Second-Order Sections (SOS) Filtering
@@ -73,39 +75,45 @@ void conv_2d(const f64* a, usize m, usize n, const f64* b, usize p, usize q, f64
 
 // Direct-Form-II-transposed IIR filter (real).
 // Assumes `a` is already normalized (`a[0] == 1`).
-// Writes `len` samples to `y`. Optional initial state `zi` (length `zi_len`)
-// and final state `zf` (length `max(nb, na) - 1` when `max(nb, na) > 1`).
-void filter_df2t(const f64* b, usize nb, const f64* a, usize na, const f64* x, usize len, f64* y,
-                 const f64* zi = nullptr, usize zi_len = 0, f64* zf = nullptr,
-                 Allocator* alloc = nullptr);
+// Writes `x.size()` samples into `y` (`y.size() >= x.size()`).
+// Optional initial state `zi` (empty = zero state) and optional final state `zf`
+// (writes `min(zf.size(), max(b.size(), a.size()) - 1)` elements when non-empty).
+[[nodiscard]] SignalStatus filter_df2t(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> x,
+                                       MutArrayRef<f64> y, ArrayRef<f64> zi = {},
+                                       MutArrayRef<f64> zf = {}, Allocator* alloc = nullptr);
 
 // Direct-Form-II-transposed IIR filter (complex).
-void filter_df2t_c64(const c64* b, usize nb, const c64* a, usize na, const c64* x, usize len,
-                     c64* y, const c64* zi = nullptr, usize zi_len = 0, c64* zf = nullptr,
-                     Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus filter_df2t_c64(ArrayRef<c64> b, ArrayRef<c64> a, ArrayRef<c64> x,
+                                           MutArrayRef<c64> y, ArrayRef<c64> zi = {},
+                                           MutArrayRef<c64> zf = {}, Allocator* alloc = nullptr);
 
-// Single biquad section DF2T recurrence with zero initial state.
-void biquad_df2t(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, const f64* x, f64* y, usize n) noexcept;
+// Single biquad section DF2T recurrence with zero initial state (`y.size() >= x.size()`).
+[[nodiscard]] SignalStatus biquad_df2t(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, ArrayRef<f64> x,
+                                       MutArrayRef<f64> y) noexcept;
 
-// Single biquad section DF2T recurrence with explicit initial state.
-void biquad_df2t_state(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, const f64* x, f64* y, usize n,
-                       f64 s1_init, f64 s2_init, BiquadState* final_state = nullptr) noexcept;
+// Single biquad section DF2T recurrence with explicit initial state (`y.size() >= x.size()`).
+[[nodiscard]] SignalStatus biquad_df2t_state(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2,
+                                             ArrayRef<f64> x, MutArrayRef<f64> y, f64 s1_init,
+                                             f64 s2_init,
+                                             BiquadState* final_state = nullptr) noexcept;
 
 // Steady-state unit-input initial conditions for one normalized biquad section.
 [[nodiscard]] BiquadState biquad_zi(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2) noexcept;
 
-// Apply an `L x 6` column-major SOS cascade to a 1D signal `x` of length `n`.
-// Optional `zi` has length `2 * L` (interleaved `(s1, s2)` per section).
+// Apply an `L x 6` column-major SOS cascade (`sos.size() >= 6 * num_sections`) to `x`,
+// writing `x.size()` samples to `y` (`y.size() >= x.size()`).
+// Optional `zi` has length `>= 2 * num_sections` (interleaved `(s1, s2)` per section) or empty.
 // Returns kZeroLeadingCoeff if any section has `a0 == 0`.
-[[nodiscard]] SignalStatus sosfilt_col_major(const f64* sos, usize num_sections, const f64* x,
-                                             f64* y, usize n, const f64* zi = nullptr,
+[[nodiscard]] SignalStatus sosfilt_col_major(ArrayRef<f64> sos, usize num_sections, ArrayRef<f64> x,
+                                             MutArrayRef<f64> y, ArrayRef<f64> zi = {},
                                              Allocator* alloc = nullptr);
 
-// Zero-phase forward-backward SOS cascade on a 1D signal `x` of length `n`
+// Zero-phase forward-backward SOS cascade on `x`, writing `x.size()` samples to `y`
 // using odd-reflection edge padding (`edge = min(6 * L, n - 1)`) and
 // DC-gain-scaled steady-state initial conditions.
-[[nodiscard]] SignalStatus sosfiltfilt_col_major(const f64* sos, usize num_sections, const f64* x,
-                                                 f64* y, usize n, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus sosfiltfilt_col_major(ArrayRef<f64> sos, usize num_sections,
+                                                 ArrayRef<f64> x, MutArrayRef<f64> y,
+                                                 Allocator* alloc = nullptr);
 
 // ============================================================================
 // Spectral & Phase Utilities
@@ -113,11 +121,12 @@ void biquad_df2t_state(f64 b0, f64 b1, f64 b2, f64 a1, f64 a2, const f64* x, f64
 
 // Single-bin Goertzel DFT at 0-based (possibly fractional) bin index `k`.
 // Computes sum_{m=0}^{n-1} x[m] * exp(-2*pi*i * k * m / n).
-[[nodiscard]] c64 goertzel_bin(const f64* x, usize n, f64 k_zero_based) noexcept;
-[[nodiscard]] c64 goertzel_bin_c64(const c64* x, usize n, f64 k_zero_based) noexcept;
+[[nodiscard]] c64 goertzel_bin(ArrayRef<f64> x, f64 k_zero_based) noexcept;
+[[nodiscard]] c64 goertzel_bin_c64(ArrayRef<c64> x, f64 k_zero_based) noexcept;
 
 // Phase unwrapping: removes jumps exceeding `period / 2` (default `2*pi`).
-// Safe for in-place (`out == phase`).
-void unwrap_phase(const f64* phase, usize n, f64* out, f64 period = kTau) noexcept;
+// Safe for in-place (`out.data() == phase.data()`). Requires `out.size() >= phase.size()`.
+[[nodiscard]] SignalStatus unwrap_phase(ArrayRef<f64> phase, MutArrayRef<f64> out,
+                                        f64 period = kTau) noexcept;
 
 } // namespace keel::signal
