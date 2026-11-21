@@ -265,9 +265,9 @@ void test_goertzel_and_unwrap() {
     f64 xr[N]{};
     c64 xc[N]{};
     for (usize n = 0; n < N; ++n) {
-        xr[n] = keel::cos(kTau * 3.0 * static_cast<f64>(n) / static_cast<f64>(N)) +
-                0.5 * keel::sin(kTau * 5.0 * static_cast<f64>(n) / static_cast<f64>(N));
-        xc[n] = c64(xr[n], 0.25 * static_cast<f64>(n));
+        xr[n] = keel::cos(kTau * 3.0 * keel::as<f64>(n) / keel::as<f64>(N)) +
+                0.5 * keel::sin(kTau * 5.0 * keel::as<f64>(n) / keel::as<f64>(N));
+        xc[n] = c64(xr[n], 0.25 * keel::as<f64>(n));
     }
 
     const f64 bins[3] = {0.0, 3.0, 4.25};
@@ -276,7 +276,7 @@ void test_goertzel_and_unwrap() {
         c64 ref_r(0.0, 0.0);
         c64 ref_c(0.0, 0.0);
         for (usize n = 0; n < N; ++n) {
-            const f64 ang = -kTau * k * static_cast<f64>(n) / static_cast<f64>(N);
+            const f64 ang = -kTau * k * keel::as<f64>(n) / keel::as<f64>(N);
             const c64 tw(keel::cos(ang), keel::sin(ang));
             ref_r = ref_r + c64(xr[n], 0.0) * tw;
             ref_c = ref_c + xc[n] * tw;
@@ -295,7 +295,7 @@ void test_goertzel_and_unwrap() {
     f64 wrapped[P]{};
     f64 out_p[P]{};
     for (usize i = 0; i < P; ++i) {
-        true_p[i] = 0.7 * static_cast<f64>(i) - 5.0;
+        true_p[i] = 0.7 * keel::as<f64>(i) - 5.0;
         wrapped[i] = true_p[i] - kTau * keel::round(true_p[i] / kTau);
     }
     CHECK(sig::unwrap_phase(wrapped, out_p) == sig::SignalStatus::kOk);

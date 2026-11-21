@@ -13,7 +13,7 @@ namespace {
     f64 sum = 1.0;
     f64 term = 1.0;
     for (i32 k = 1; k <= 100; ++k) {
-        const f64 ratio = x / (2.0 * static_cast<f64>(k));
+        const f64 ratio = x / (2.0 * as<f64>(k));
         term *= ratio * ratio;
         sum += term;
         if (term < 1e-16 * sum) {
@@ -39,9 +39,9 @@ void hann(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 denom = static_cast<f64>(n - 1);
+    const f64 denom = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        out[i] = 0.5 * (1.0 - keel::cos(kTau * static_cast<f64>(i) / denom));
+        out[i] = 0.5 * (1.0 - keel::cos(kTau * as<f64>(i) / denom));
     }
 }
 
@@ -52,9 +52,9 @@ void hamming(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 denom = static_cast<f64>(n - 1);
+    const f64 denom = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        out[i] = 0.54 - 0.46 * keel::cos(kTau * static_cast<f64>(i) / denom);
+        out[i] = 0.54 - 0.46 * keel::cos(kTau * as<f64>(i) / denom);
     }
 }
 
@@ -65,9 +65,9 @@ void blackman(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 denom = static_cast<f64>(n - 1);
+    const f64 denom = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        const f64 x = kTau * static_cast<f64>(i) / denom;
+        const f64 x = kTau * as<f64>(i) / denom;
         out[i] = 0.42 - 0.5 * keel::cos(x) + 0.08 * keel::cos(2.0 * x);
     }
 }
@@ -79,9 +79,9 @@ void bartlett(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 half = static_cast<f64>(n - 1) * 0.5;
+    const f64 half = as<f64>(n - 1) * 0.5;
     for (usize i = 0; i < n; ++i) {
-        out[i] = 1.0 - keel::abs((static_cast<f64>(i) - half) / half);
+        out[i] = 1.0 - keel::abs((as<f64>(i) - half) / half);
     }
 }
 
@@ -92,17 +92,17 @@ void triang(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 mid = (static_cast<f64>(n) - 1.0) * 0.5;
+    const f64 mid = (as<f64>(n) - 1.0) * 0.5;
     if ((n & 1u) == 0u) {
-        const f64 denom = static_cast<f64>(n);
-        const f64 nm1 = static_cast<f64>(n - 1);
+        const f64 denom = as<f64>(n);
+        const f64 nm1 = as<f64>(n - 1);
         for (usize i = 0; i < n; ++i) {
-            out[i] = 1.0 - keel::abs((2.0 * static_cast<f64>(i) - nm1) / denom);
+            out[i] = 1.0 - keel::abs((2.0 * as<f64>(i) - nm1) / denom);
         }
     } else {
-        const f64 denom = static_cast<f64>(n + 1);
+        const f64 denom = as<f64>(n + 1);
         for (usize i = 0; i < n; ++i) {
-            out[i] = 1.0 - keel::abs(2.0 * (static_cast<f64>(i) - mid)) / denom;
+            out[i] = 1.0 - keel::abs(2.0 * (as<f64>(i) - mid)) / denom;
         }
     }
 }
@@ -115,9 +115,9 @@ void kaiser(MutArrayRef<f64> out, f64 beta) noexcept {
         return;
     }
     const f64 denom = bessel_i0(beta);
-    const f64 nm1 = static_cast<f64>(n - 1);
+    const f64 nm1 = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        const f64 alpha = 2.0 * static_cast<f64>(i) / nm1 - 1.0;
+        const f64 alpha = 2.0 * as<f64>(i) / nm1 - 1.0;
         const f64 inside = 1.0 - alpha * alpha;
         out[i] = bessel_i0(beta * keel::sqrt(inside > 0.0 ? inside : 0.0)) / denom;
     }
@@ -138,10 +138,10 @@ void tukeywin(MutArrayRef<f64> out, f64 r) noexcept {
         }
         return;
     }
-    const f64 nm1 = static_cast<f64>(n - 1);
+    const f64 nm1 = as<f64>(n - 1);
     const f64 t_edge = r * nm1 * 0.5;
     for (usize i = 0; i < n; ++i) {
-        const f64 x = static_cast<f64>(i);
+        const f64 x = as<f64>(i);
         if (x < t_edge) {
             out[i] = 0.5 * (1.0 + keel::cos(kPi * (x / t_edge - 1.0)));
         } else if (x > nm1 - t_edge) {
@@ -164,9 +164,9 @@ void flattopwin(MutArrayRef<f64> out) noexcept {
     constexpr f64 a2 = 0.277263158;
     constexpr f64 a3 = 0.083578947;
     constexpr f64 a4 = 0.006947368;
-    const f64 nm1 = static_cast<f64>(n - 1);
+    const f64 nm1 = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        const f64 x = kTau * static_cast<f64>(i) / nm1;
+        const f64 x = kTau * as<f64>(i) / nm1;
         out[i] = a0 - a1 * keel::cos(x) + a2 * keel::cos(2.0 * x) - a3 * keel::cos(3.0 * x) +
                  a4 * keel::cos(4.0 * x);
     }
@@ -179,10 +179,10 @@ void parzenwin(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 half = static_cast<f64>(n) * 0.5;
-    const f64 mid = (static_cast<f64>(n) - 1.0) * 0.5;
+    const f64 half = as<f64>(n) * 0.5;
+    const f64 mid = (as<f64>(n) - 1.0) * 0.5;
     for (usize i = 0; i < n; ++i) {
-        const f64 dist = keel::abs(static_cast<f64>(i) - mid);
+        const f64 dist = keel::abs(as<f64>(i) - mid);
         const f64 r = dist / half;
         if (dist <= half * 0.5) {
             out[i] = 1.0 - 6.0 * r * r + 6.0 * r * r * r;
@@ -204,9 +204,9 @@ void nuttallwin(MutArrayRef<f64> out) noexcept {
     constexpr f64 a1 = 0.4891775;
     constexpr f64 a2 = 0.1365995;
     constexpr f64 a3 = 0.0106411;
-    const f64 nm1 = static_cast<f64>(n - 1);
+    const f64 nm1 = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        const f64 x = kTau * static_cast<f64>(i) / nm1;
+        const f64 x = kTau * as<f64>(i) / nm1;
         out[i] = a0 - a1 * keel::cos(x) + a2 * keel::cos(2.0 * x) - a3 * keel::cos(3.0 * x);
     }
 }
@@ -222,9 +222,9 @@ void blackmanharris(MutArrayRef<f64> out) noexcept {
     constexpr f64 a1 = 0.48829;
     constexpr f64 a2 = 0.14128;
     constexpr f64 a3 = 0.01168;
-    const f64 nm1 = static_cast<f64>(n - 1);
+    const f64 nm1 = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        const f64 x = kTau * static_cast<f64>(i) / nm1;
+        const f64 x = kTau * as<f64>(i) / nm1;
         out[i] = a0 - a1 * keel::cos(x) + a2 * keel::cos(2.0 * x) - a3 * keel::cos(3.0 * x);
     }
 }
@@ -236,9 +236,9 @@ void bohmanwin(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 half = (static_cast<f64>(n) - 1.0) * 0.5;
+    const f64 half = (as<f64>(n) - 1.0) * 0.5;
     for (usize i = 0; i < n; ++i) {
-        const f64 x = keel::abs((static_cast<f64>(i) - half) / half);
+        const f64 x = keel::abs((as<f64>(i) - half) / half);
         if (x >= 1.0) {
             out[i] = 0.0;
         } else {
@@ -254,9 +254,9 @@ void barthannwin(MutArrayRef<f64> out) noexcept {
         out[0] = 1.0;
         return;
     }
-    const f64 nm1 = static_cast<f64>(n - 1);
+    const f64 nm1 = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
-        const f64 t = static_cast<f64>(i) / nm1 - 0.5;
+        const f64 t = as<f64>(i) / nm1 - 0.5;
         out[i] = 0.62 - 0.48 * keel::abs(t) + 0.38 * keel::cos(kTau * t);
     }
 }
@@ -273,9 +273,9 @@ SignalStatus gausswin(MutArrayRef<f64> out, f64 alpha) noexcept {
         out[0] = 1.0;
         return SignalStatus::kOk;
     }
-    const f64 half = static_cast<f64>(n - 1) * 0.5;
+    const f64 half = as<f64>(n - 1) * 0.5;
     for (usize i = 0; i < n; ++i) {
-        const f64 v = (static_cast<f64>(i) - half) / half;
+        const f64 v = (as<f64>(i) - half) / half;
         out[i] = keel::exp(-0.5 * (alpha * v) * (alpha * v));
     }
     return SignalStatus::kOk;
@@ -295,8 +295,8 @@ SignalStatus chebwin(MutArrayRef<f64> out, f64 at_db, Allocator* alloc) {
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
-    const i64 order = static_cast<i64>(n - 1);
-    const f64 order_f = static_cast<f64>(order);
+    const i64 order = as<i64>(n - 1);
+    const f64 order_f = as<f64>(order);
     const f64 r_lin = keel::pow(10.0, at_db / 20.0);
     const f64 beta = keel::cosh(keel::acosh(r_lin) / order_f);
 
@@ -310,19 +310,19 @@ SignalStatus chebwin(MutArrayRef<f64> out, f64 at_db, Allocator* alloc) {
 
     const usize k_max = (n - 1) / 2;
     Array<f64> wp(k_max + 1, scratch.allocator());
-    const f64 n_f = static_cast<f64>(n);
+    const f64 n_f = as<f64>(n);
     for (usize k = 0; k <= k_max; ++k) {
-        const f64 ck = beta * keel::cos(kPi * static_cast<f64>(k) / n_f);
+        const f64 ck = beta * keel::cos(kPi * as<f64>(k) / n_f);
         wp[k] = cheb_t(ck);
     }
 
-    const f64 n0 = 0.5 * static_cast<f64>(n - 1);
+    const f64 n0 = 0.5 * as<f64>(n - 1);
     const f64 two_pi_over_n = kTau / n_f;
     for (usize idx = 0; idx < n; ++idx) {
         f64 s = wp[0];
-        const f64 phase_n = static_cast<f64>(idx) - n0;
+        const f64 phase_n = as<f64>(idx) - n0;
         for (usize k = 1; k <= k_max; ++k) {
-            s += 2.0 * wp[k] * keel::cos(two_pi_over_n * static_cast<f64>(k) * phase_n);
+            s += 2.0 * wp[k] * keel::cos(two_pi_over_n * as<f64>(k) * phase_n);
         }
         out[idx] = s / n_f;
     }
@@ -353,36 +353,36 @@ SignalStatus taylorwin(MutArrayRef<f64> out, i32 nbar, f64 sll_db, Allocator* al
     ArenaTemp scratch = keel::get_scratch(alloc);
     const f64 r = keel::pow(10.0, -sll_db / 20.0);
     const f64 a = keel::log(r + keel::sqrt(r * r - 1.0)) / kPi;
-    const f64 nbar_f = static_cast<f64>(nbar);
+    const f64 nbar_f = as<f64>(nbar);
     const f64 sigma2 = (nbar_f * nbar_f) / (a * a + (nbar_f - 0.5) * (nbar_f - 0.5));
 
-    Array<f64> fm(static_cast<usize>(nbar - 1), 0.0, scratch.allocator());
+    Array<f64> fm(as<usize>(nbar - 1), 0.0, scratch.allocator());
     for (i32 m = 1; m < nbar; ++m) {
-        const f64 m2 = static_cast<f64>(m) * static_cast<f64>(m);
+        const f64 m2 = as<f64>(m) * as<f64>(m);
         f64 num = 1.0;
         f64 den = 1.0;
         for (i32 k = 1; k < nbar; ++k) {
-            const f64 kf = static_cast<f64>(k) - 0.5;
+            const f64 kf = as<f64>(k) - 0.5;
             const f64 p = sigma2 * (a * a + kf * kf);
             num *= 1.0 - m2 / p;
         }
         for (i32 k = 1; k < nbar; ++k) {
             if (k == m) continue;
-            const f64 k2 = static_cast<f64>(k) * static_cast<f64>(k);
+            const f64 k2 = as<f64>(k) * as<f64>(k);
             den *= 1.0 - m2 / k2;
         }
         const f64 sign = ((m & 1) != 0) ? 1.0 : -1.0;
-        fm[static_cast<usize>(m - 1)] = sign * 0.5 * num / den;
+        fm[as<usize>(m - 1)] = sign * 0.5 * num / den;
     }
 
-    const f64 nm1 = static_cast<f64>(n - 1);
-    const f64 n_f = static_cast<f64>(n);
+    const f64 nm1 = as<f64>(n - 1);
+    const f64 n_f = as<f64>(n);
     for (usize i = 0; i < n; ++i) {
-        const f64 xn = static_cast<f64>(i) - nm1 * 0.5;
+        const f64 xn = as<f64>(i) - nm1 * 0.5;
         f64 w = 1.0;
         for (i32 m = 1; m < nbar; ++m) {
-            w += 2.0 * fm[static_cast<usize>(m - 1)] *
-                 keel::cos(kTau * static_cast<f64>(m) * xn / n_f);
+            w += 2.0 * fm[as<usize>(m - 1)] *
+                 keel::cos(kTau * as<f64>(m) * xn / n_f);
         }
         out[i] = w;
     }
@@ -401,16 +401,16 @@ SignalStatus dpss(usize n, f64 nw, MutArrayRef<f64> tapers_col_major, MutArrayRe
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
-    const f64 w = nw / static_cast<f64>(n);
+    const f64 w = nw / as<f64>(n);
     const f64 cos2piw = keel::cos(kTau * w);
 
     Array<f64> d(n, 0.0, scratch.allocator());
     Array<f64> e(n, 0.0, scratch.allocator());
     for (usize i = 0; i < n; ++i) {
-        const f64 h = 0.5 * (static_cast<f64>(n - 1) - 2.0 * static_cast<f64>(i));
+        const f64 h = 0.5 * (as<f64>(n - 1) - 2.0 * as<f64>(i));
         d[i] = h * h * cos2piw;
         if (i + 1 < n) {
-            e[i] = 0.5 * static_cast<f64>(i + 1) * static_cast<f64>(n - 1 - i);
+            e[i] = 0.5 * as<f64>(i + 1) * as<f64>(n - 1 - i);
         }
     }
 
@@ -477,7 +477,7 @@ SignalStatus dpss(usize n, f64 nw, MutArrayRef<f64> tapers_col_major, MutArrayRe
     Array<f64> sinc_lag(n, scratch.allocator());
     sinc_lag[0] = 2.0 * w;
     for (usize lag = 1; lag < n; ++lag) {
-        sinc_lag[lag] = keel::sin(kTau * w * static_cast<f64>(lag)) / (kPi * static_cast<f64>(lag));
+        sinc_lag[lag] = keel::sin(kTau * w * as<f64>(lag)) / (kPi * as<f64>(lag));
     }
 
     for (usize j = 0; j < k; ++j) {
@@ -487,7 +487,7 @@ SignalStatus dpss(usize n, f64 nw, MutArrayRef<f64> tapers_col_major, MutArrayRe
             for (usize idx = 0; idx < n; ++idx) pol += col[idx];
         } else {
             for (usize idx = 0; idx < n; ++idx) {
-                pol += (static_cast<f64>(n - 1) - 2.0 * static_cast<f64>(idx)) * col[idx];
+                pol += (as<f64>(n - 1) - 2.0 * as<f64>(idx)) * col[idx];
             }
         }
         const f64 sign = (pol < 0.0) ? -1.0 : 1.0;

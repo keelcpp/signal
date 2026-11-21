@@ -9,7 +9,7 @@ c64 goertzel_bin(ArrayRef<f64> x, f64 k_zero_based) noexcept {
     if (n == 0) {
         return c64(0.0, 0.0);
     }
-    const f64 w = kTau * k_zero_based / static_cast<f64>(n);
+    const f64 w = kTau * k_zero_based / as<f64>(n);
     const f64 cw = keel::cos(w);
     const f64 sw = keel::sin(w);
     const f64 coeff = 2.0 * cw;
@@ -23,7 +23,7 @@ c64 goertzel_bin(ArrayRef<f64> x, f64 k_zero_based) noexcept {
     }
     const f64 y_re = s_prev - cw * s_prev2;
     const f64 y_im = sw * s_prev2;
-    const f64 phase = w * static_cast<f64>(n - 1);
+    const f64 phase = w * as<f64>(n - 1);
     const f64 pcw = keel::cos(phase);
     const f64 psw = keel::sin(phase);
     return c64(y_re * pcw + y_im * psw, y_im * pcw - y_re * psw);
@@ -34,7 +34,7 @@ c64 goertzel_bin_c64(ArrayRef<c64> x, f64 k_zero_based) noexcept {
     if (n == 0) {
         return c64(0.0, 0.0);
     }
-    const f64 w = kTau * k_zero_based / static_cast<f64>(n);
+    const f64 w = kTau * k_zero_based / as<f64>(n);
     const f64 cw = keel::cos(w);
     const f64 sw = keel::sin(w);
     const f64 coeff = 2.0 * cw;
@@ -47,7 +47,7 @@ c64 goertzel_bin_c64(ArrayRef<c64> x, f64 k_zero_based) noexcept {
         s_prev = s;
     }
     const c64 y = s_prev - c64(cw, -sw) * s_prev2;
-    const f64 phase = w * static_cast<f64>(n - 1);
+    const f64 phase = w * as<f64>(n - 1);
     const f64 pcw = keel::cos(phase);
     const f64 psw = keel::sin(phase);
     return y * c64(pcw, -psw);
