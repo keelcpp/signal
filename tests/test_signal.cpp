@@ -470,6 +470,169 @@ void test_spectral_and_stft() {
     }
 }
 
+void test_iir_design() {
+    // Analog prototypes
+    sig::ZpkResult zpk;
+    CHECK(sig::buttap(4, zpk) == sig::SignalStatus::kOk);
+    CHECK(zpk.z.empty());
+    CHECK(zpk.p.size() == 4);
+    CHECK_NEAR(zpk.k, 1.0, 1e-12);
+    for (usize i = 0; i < 4; ++i) {
+        CHECK(zpk.p[i].real() < 0.0);
+        CHECK_NEAR(keel::abs(zpk.p[i]), 1.0, 1e-12);
+    }
+
+    CHECK(sig::cheb1ap(3, 1.0, zpk) == sig::SignalStatus::kOk);
+    CHECK(zpk.z.empty() && zpk.p.size() == 3);
+    CHECK(sig::cheb2ap(4, 40.0, zpk) == sig::SignalStatus::kOk);
+    CHECK(zpk.z.size() == 4 && zpk.p.size() == 4);
+    CHECK(sig::besselap(3, zpk) == sig::SignalStatus::kOk);
+    CHECK(zpk.z.empty() && zpk.p.size() == 3);
+    CHECK(sig::ellipap(4, 1.0, 40.0, zpk) == sig::SignalStatus::kOk);
+    CHECK(zpk.z.size() == 4 && zpk.p.size() == 4);
+
+    // lp2lp / lp2hp / lp2bp / lp2bs
+    sig::ZpkResult bp_zpk, tx;
+    CHECK(sig::buttap(2, bp_zpk) == sig::SignalStatus::kOk);
+    CHECK(sig::lp2lp(bp_zpk.z.as_ref(), bp_zpk.p.as_ref(), bp_zpk.k, 10.0, tx) ==
+          sig::SignalStatus::kOk);
+    CHECK_NEAR(keel::abs(tx.p[0]), 10.0, 1e-12);
+    CHECK(sig::lp2hp(bp_zpk.z.as_ref(), bp_zpk.p.as_ref(), bp_zpk.k, 5.0, tx) ==
+          sig::SignalStatus::kOk);
+    CHECK(tx.z.size() == 2 && tx.p.size() == 2);
+    CHECK(sig::lp2bp(bp_zpk.z.as_ref(), bp_zpk.p.as_ref(), bp_zpk.k, 10.0, 2.0, tx) ==
+          sig::SignalStatus::kOk);
+    CHECK(tx.z.size() == 2 && tx.p.size() == 4);
+    CHECK(sig::lp2bs(bp_zpk.z.as_ref(), bp_zpk.p.as_ref(), bp_zpk.k, 10.0, 2.0, tx) ==
+          sig::SignalStatus::kOk);
+    CHECK(tx.z.size() == 4 && tx.p.size() == 4);
+
+    // bilinear, impinvar, freqs on 1st-order RC H(s) = 1 / (s + 1)
+    const f64 b1[1] = {1.0};
+    const f64 a1[2] = {1.0, 1.0};
+    sig::TfResult tf;
+    CHECK(sig::bilinear(b1, a1, 10.0, 0.0, tf) == sig::SignalStatus::kOk);
+    CHECK(tf.b.size() == 2 && tf.a.size() == 2);
+    // DC gain = (b0+b1)/(a0+a1) == 1
+    CHECK_NEAR((tf.b[0] + tf.b[1]) / (tf.a[0] + tf.a[1]), 1.0, 1e-12);
+
+    CHECK(sig::impinvar(b1, a1, 10.0, tf) == sig::SignalStatus::kOk);
+    CHECK(tf.b.size() >= 1 && tf.a.size() == 2);
+    CHECK_NEAR(tf.a[1], -keel::exp(-0.1), 1e-12);
+
+    const f64 w[2] = {0.0, 1.0};
+    c64 h[2]{};
+    CHECK(sig::freqs(b1, a1, w, h) == sig::SignalStatus::kOk);
+    CHECK_NEAR(h[0].real(), 1.0, 1e-12);
+    CHECK_NEAR(keel::abs(h[1]), 1.0 / keel::kSqrt2, 1e-12);
+
+    // Digital Butterworth lowpass: DC gain = 1, Nyquist gain = 0, -3dB at Wn
+    const f64 wn_lp[1] = {0.4};
+    CHECK(sig::butter(4, wn_lp, sig::FilterType::kLowpass, false, tf) == sig::SignalStatus::kOk);
+    CHECK(tf.b.size() == 5 && tf.a.size() == 5);
+    f64 sum_b = 0.0, sum_a = 0.0, alt_b = 0.0;
+    for (usize i = 0; i < 5; ++i) {
+        sum_b += tf.b[i];
+        sum_a += tf.a[i];
+        alt_b += (i % 2 == 0 ? 1.0 : -1.0) * tf.b[i];
+    }
+    CHECK_NEAR(sum_b / sum_a, 1.0, 1e-12);
+    CHECK_NEAR(alt_b, 0.0, 1e-12);
+
+    // Chebyshev I/II, Elliptic bandpass, Bessel analog
+    const f64 wn_bp[2] = {0.2, 0.5};
+    CHECK(sig::cheby1(3, 1.0, wn_lp, sig::FilterType::kHighpass, false, tf) ==
+          sig::SignalStatus::kOk);
+    CHECK(tf.b.size() == 4 && tf.a.size() == 4);
+    CHECK(sig::cheby2(3, 40.0, wn_lp, sig::FilterType::kLowpass, false, tf) ==
+          sig::SignalStatus::kOk);
+    CHECK(tf.b.size() == 4 && tf.a.size() == 4);
+    CHECK(sig::ellip(2, 1.0, 40.0, wn_bp, sig::FilterType::kBandpass, false, tf) ==
+          sig::SignalStatus::kOk);
+    CHECK(tf.b.size() == 5 && tf.a.size() == 5);
+    const f64 wn_an[1] = {100.0};
+    CHECK(sig::besself(3, wn_an, sig::FilterType::kLowpass, true, tf) == sig::SignalStatus::kOk);
+    CHECK(tf.b.size() == 4 && tf.a.size() == 4);
+
+    // Order estimators
+    const f64 wp[1] = {0.2}, ws[1] = {0.3};
+    sig::OrderResult ord;
+    CHECK(sig::buttord(wp, ws, 3.0, 40.0, false, ord) == sig::SignalStatus::kOk);
+    CHECK(ord.order >= 10 && ord.wn_count == 1);
+    sig::OrderResult ord_c1, ord_c2, ord_el;
+    CHECK(sig::cheb1ord(wp, ws, 3.0, 40.0, false, ord_c1) == sig::SignalStatus::kOk);
+    CHECK(sig::cheb2ord(wp, ws, 3.0, 40.0, false, ord_c2) == sig::SignalStatus::kOk);
+    CHECK(sig::ellipord(wp, ws, 3.0, 40.0, false, ord_el) == sig::SignalStatus::kOk);
+    CHECK(ord_el.order <= ord_c1.order && ord_c1.order <= ord.order);
+
+    const f64 f_fir[2] = {1500.0, 2000.0};
+    const f64 a_fir[2] = {1.0, 0.0};
+    const f64 dev_fir[2] = {0.01, 0.1};
+    sig::FirpmOrdResult pm;
+    CHECK(sig::firpmord(f_fir, a_fir, dev_fir, 8000.0, pm) == sig::SignalStatus::kOk);
+    CHECK(pm.order > 0 && pm.f.size() == 4 && pm.a.size() == 4 && pm.w.size() == 2);
+
+    sig::KaiserOrdResult ko;
+    CHECK(sig::kaiserord(f_fir, a_fir, dev_fir, 8000.0, ko) == sig::SignalStatus::kOk);
+    CHECK(ko.order > 0 && ko.wn.size() == 1 && ko.ftype == sig::KaiserBandType::kLow);
+}
+
+void test_multirate() {
+    // upfirdn: p=1, q=1 matches linear convolution
+    const f64 x[4] = {1.0, 2.0, 3.0, 4.0};
+    const f64 h[3] = {0.5, 1.0, 0.5};
+    f64 conv_ref[6]{};
+    CHECK(sig::conv_1d(x, h, conv_ref) == sig::SignalStatus::kOk);
+    f64 y1[6]{};
+    CHECK(sig::upfirdn_length(4, 3, 1, 1) == 6);
+    CHECK(sig::upfirdn(x, h, 1, 1, y1) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 6; ++i) {
+        CHECK_NEAR(y1[i], conv_ref[i], 1e-12);
+    }
+
+    // upfirdn p=3, q=2 matches explicit upsample -> conv -> downsample
+    const usize p = 3, q = 2;
+    const usize up_len = (4 - 1) * p + 1;
+    f64 x_up[10]{};
+    for (usize i = 0; i < 4; ++i) x_up[i * p] = x[i];
+    f64 full[12]{};
+    CHECK(sig::conv_1d(keel::ArrayRef<f64>(x_up, up_len), h, full) == sig::SignalStatus::kOk);
+    const usize out_len = sig::upfirdn_length(4, 3, p, q);
+    CHECK(out_len == 6);
+    f64 ypq[6]{};
+    CHECK(sig::upfirdn(x, h, p, q, ypq) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < out_len; ++i) {
+        CHECK_NEAR(ypq[i], full[i * q], 1e-12);
+    }
+
+    // fftfilt matches direct FIR filter_df2t (real and complex)
+    f64 sig_x[100]{};
+    for (usize i = 0; i < 100; ++i) {
+        sig_x[i] = keel::sin(0.13 * keel::as<f64>(i)) + 0.3 * keel::cos(0.7 * keel::as<f64>(i));
+    }
+    const f64 b_fir[7] = {0.05, 0.1, 0.2, 0.3, 0.2, 0.1, 0.05};
+    const f64 a_one[1] = {1.0};
+    f64 y_ref[100]{}, y_fft[100]{};
+    CHECK(sig::filter_df2t(b_fir, a_one, sig_x, y_ref) == sig::SignalStatus::kOk);
+    CHECK(sig::fftfilt(b_fir, sig_x, 0, y_fft) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 100; ++i) {
+        CHECK_NEAR(y_fft[i], y_ref[i], 1e-12);
+    }
+
+    c64 b_c[3] = {c64(1.0, 0.5), c64(0.5, -0.25), c64(0.25, 0.1)};
+    c64 x_c[40]{}, y_cref[40]{}, y_cfft[40]{};
+    const c64 a_cone[1] = {c64(1.0, 0.0)};
+    for (usize i = 0; i < 40; ++i) {
+        x_c[i] = c64(keel::cos(0.2 * keel::as<f64>(i)), keel::sin(0.3 * keel::as<f64>(i)));
+    }
+    CHECK(sig::filter_df2t_c64(b_c, a_cone, x_c, y_cref) == sig::SignalStatus::kOk);
+    CHECK(sig::fftfilt_c64(b_c, x_c, 16, y_cfft) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 40; ++i) {
+        CHECK_NEAR(y_cfft[i].real(), y_cref[i].real(), 1e-12);
+        CHECK_NEAR(y_cfft[i].imag(), y_cref[i].imag(), 1e-12);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -480,6 +643,8 @@ int main() {
     test_dct_fwht_hilbert();
     test_smoothing_and_findpeaks();
     test_spectral_and_stft();
+    test_iir_design();
+    test_multirate();
 
     if (g_failures == 0) {
         std::printf("ALL keel::signal TESTS PASSED\n");

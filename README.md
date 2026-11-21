@@ -10,6 +10,8 @@ Zero-STL C++20 digital signal processing kernels built on [`keel`](https://githu
 - **Transforms & envelopes**: single-bin Goertzel DFT (`goertzel_bin`, `goertzel_bin_c64`), phase unwrapping (`unwrap_phase`), orthonormal DCT/IDCT Types 1–4 (`dct`, `idct`, FFT-accelerated for Types 2/3), Fast Walsh-Hadamard Transform (`fwht`, `ifwht` in sequency/Hadamard/dyadic orderings), analytic Hilbert signal (`hilbert`), and analytic/FIR/RMS envelopes (`envelope_analytic`, `envelope_fir`, `envelope_rms`).
 - **Smoothing, gap-filling & peaks**: sliding median (`medfilt1`), forward-backward Burg AR NaN interpolation (`fillgaps`, `fillgaps_c64`), Savitzky-Golay projection/differentiation matrices & filtering (`sgolay`, `sgolayfilt`), and topographic peak detection (`findpeaks`).
 - **Spectral & time-frequency estimation**: `periodogram`, `periodogram_c64`, Welch PSD (`pwelch`, `pwelch_c64`), cross-spectral estimators (`cpsd`, `mscohere`, `tfestimate`), parametric AR PSDs (`pyulear`, `pburg`), `spectrogram`, `stft`/`stft_c64`, `istft`, and `iscola`.
+- **Analog prototypes, transforms & IIR filter design**: `buttap`, `cheb1ap`, `cheb2ap`, `besselap`, `ellipap`, frequency transforms (`lp2lp`, `lp2hp`, `lp2bp`, `lp2bs`), `bilinear`, `impinvar`, `freqs`, IIR designs (`butter`, `cheby1`, `cheby2`, `ellip`, `besself`), and order estimators (`buttord`, `cheb1ord`, `cheb2ord`, `ellipord`, `firpmord`, `kaiserord`).
+- **Multirate & overlap-add filtering**: polyphase rational resampling (`upfirdn`) and FFT overlap-add FIR filtering (`fftfilt`, `fftfilt_c64`).
 
 ## Design
 

@@ -307,4 +307,128 @@ struct ColaResult {
 [[nodiscard]] SignalStatus iscola(ArrayRef<f64> window, usize noverlap, bool wola, ColaResult& out,
                                   Allocator* alloc = nullptr);
 
+// ============================================================================
+// Analog Prototypes, Frequency Transforms & IIR Filter Design
+// ============================================================================
+
+enum class FilterType : u8 {
+    kLowpass = 0,
+    kHighpass,
+    kBandpass,
+    kBandstop,
+};
+
+enum class KaiserBandType : u8 {
+    kLow = 0,
+    kHigh,
+    kStop,
+    kDc0,
+    kDc1,
+};
+
+struct ZpkResult {
+    Array<c64> z;
+    Array<c64> p;
+    f64 k = 1.0;
+};
+
+struct TfResult {
+    Array<f64> b;
+    Array<f64> a;
+};
+
+struct OrderResult {
+    i32 order = 0;
+    f64 wn[2] = {0.0, 0.0};
+    usize wn_count = 0;
+};
+
+struct FirpmOrdResult {
+    i32 order = 0;
+    Array<f64> f;
+    Array<f64> a;
+    Array<f64> w;
+};
+
+struct KaiserOrdResult {
+    i32 order = 0;
+    Array<f64> wn;
+    f64 beta = 0.0;
+    KaiserBandType ftype = KaiserBandType::kLow;
+};
+
+// Analog lowpass prototypes (cutoff Omega = 1 rad/s).
+[[nodiscard]] SignalStatus buttap(i32 n, ZpkResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus cheb1ap(i32 n, f64 rp_db, ZpkResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus cheb2ap(i32 n, f64 rs_db, ZpkResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus besselap(i32 n, ZpkResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus ellipap(i32 n, f64 rp_db, f64 rs_db, ZpkResult& out,
+                                   Allocator* alloc = nullptr);
+
+// Analog lowpass -> LP / HP / BP / BS frequency transformations.
+[[nodiscard]] SignalStatus lp2lp(ArrayRef<c64> z, ArrayRef<c64> p, f64 k, f64 wo, ZpkResult& out,
+                                 Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus lp2hp(ArrayRef<c64> z, ArrayRef<c64> p, f64 k, f64 wo, ZpkResult& out,
+                                 Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus lp2bp(ArrayRef<c64> z, ArrayRef<c64> p, f64 k, f64 wo, f64 bw,
+                                 ZpkResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus lp2bs(ArrayRef<c64> z, ArrayRef<c64> p, f64 k, f64 wo, f64 bw,
+                                 ZpkResult& out, Allocator* alloc = nullptr);
+
+// Bilinear (Tustin) transform (`fp == 0` disables prewarping) & impulse invariance.
+[[nodiscard]] SignalStatus bilinear(ArrayRef<f64> b, ArrayRef<f64> a, f64 fs, f64 fp,
+                                    TfResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus impinvar(ArrayRef<f64> b, ArrayRef<f64> a, f64 fs, TfResult& out,
+                                    Allocator* alloc = nullptr);
+
+// Analog frequency response H(j*w) = b(j*w) / a(j*w).
+[[nodiscard]] SignalStatus freqs(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> w,
+                                 MutArrayRef<c64> h_out) noexcept;
+
+// Top-level IIR filter designs (`wn` has length 1 for LP/HP, length 2 for BP/BS).
+[[nodiscard]] SignalStatus butter(i32 n, ArrayRef<f64> wn, FilterType ftype, bool analog,
+                                  TfResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus cheby1(i32 n, f64 rp_db, ArrayRef<f64> wn, FilterType ftype, bool analog,
+                                  TfResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus cheby2(i32 n, f64 rs_db, ArrayRef<f64> wn, FilterType ftype, bool analog,
+                                  TfResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus ellip(i32 n, f64 rp_db, f64 rs_db, ArrayRef<f64> wn, FilterType ftype,
+                                 bool analog, TfResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus besself(i32 n, ArrayRef<f64> wn, FilterType ftype, bool analog,
+                                   TfResult& out, Allocator* alloc = nullptr);
+
+// IIR & FIR order estimators.
+[[nodiscard]] SignalStatus buttord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db,
+                                   bool analog, OrderResult& out) noexcept;
+[[nodiscard]] SignalStatus cheb1ord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db,
+                                    bool analog, OrderResult& out) noexcept;
+[[nodiscard]] SignalStatus cheb2ord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db,
+                                    bool analog, OrderResult& out) noexcept;
+[[nodiscard]] SignalStatus ellipord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db,
+                                    bool analog, OrderResult& out) noexcept;
+[[nodiscard]] SignalStatus firpmord(ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> dev, f64 fs,
+                                    FirpmOrdResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus kaiserord(ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> dev, f64 fs,
+                                     KaiserOrdResult& out, Allocator* alloc = nullptr);
+
+// ============================================================================
+// Multirate & Fast Overlap-Add Filtering
+// ============================================================================
+
+[[nodiscard]] constexpr usize upfirdn_length(usize lx, usize lh, usize p, usize q) noexcept {
+    if (lx == 0 || lh == 0 || p == 0 || q == 0) return 0;
+    const usize conv_len = (lx - 1) * p + lh;
+    return (conv_len + q - 1) / q;
+}
+
+// Polyphase upsample-by-p, FIR-convolve with `h`, downsample-by-q.
+[[nodiscard]] SignalStatus upfirdn(ArrayRef<f64> x, ArrayRef<f64> h, usize p, usize q,
+                                   MutArrayRef<f64> out, Allocator* alloc = nullptr);
+
+// Overlap-add FFT FIR filtering (`nfft == 0` selects automatic power-of-2 block size).
+[[nodiscard]] SignalStatus fftfilt(ArrayRef<f64> b, ArrayRef<f64> x, usize nfft,
+                                   MutArrayRef<f64> out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus fftfilt_c64(ArrayRef<c64> b, ArrayRef<c64> x, usize nfft,
+                                       MutArrayRef<c64> out, Allocator* alloc = nullptr);
+
 } // namespace keel::signal

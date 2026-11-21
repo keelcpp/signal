@@ -46,6 +46,29 @@ if(NOT TARGET keel::fft)
     FetchContent_MakeAvailable(keel_fft)
 endif()
 
+if(NOT TARGET keel::poly)
+    find_package(keel_poly QUIET CONFIG)
+    if(TARGET keel::keel_poly AND NOT TARGET keel::poly)
+        add_library(keel::poly ALIAS keel::keel_poly)
+    endif()
+endif()
+if(NOT TARGET keel::poly)
+    include(FetchContent)
+    set(KEEL_POLY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../poly/CMakeLists.txt" AND NOT DEFINED FETCHCONTENT_SOURCE_DIR_KEEL_POLY)
+        set(FETCHCONTENT_SOURCE_DIR_KEEL_POLY "${CMAKE_CURRENT_SOURCE_DIR}/../poly" CACHE PATH "Local keel_poly checkout")
+    endif()
+    if(KEEL_SIGNAL_NO_EXCEPTIONS_RTTI)
+        set(KEEL_POLY_NO_EXCEPTIONS_RTTI ON CACHE BOOL "" FORCE)
+    endif()
+    FetchContent_Declare(
+        keel_poly
+        GIT_REPOSITORY https://github.com/keelcpp/poly.git
+        GIT_TAG        87429cfe8d8a3353b24ffdfa7385baba42c049ee
+    )
+    FetchContent_MakeAvailable(keel_poly)
+endif()
+
 add_library(keel_signal STATIC
     src/windows.cpp
     src/conv.cpp
@@ -57,12 +80,14 @@ add_library(keel_signal STATIC
     src/smoothing.cpp
     src/findpeaks.cpp
     src/spectral.cpp
+    src/iir_design.cpp
+    src/multirate.cpp
 )
 add_library(keel::signal ALIAS keel_signal)
 
 target_link_libraries(keel_signal
     PUBLIC  keel::keel
-    PRIVATE keel::fft
+    PRIVATE keel::fft keel::poly
 )
 
 target_compile_features(keel_signal PUBLIC cxx_std_20)
