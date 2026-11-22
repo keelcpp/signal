@@ -26,24 +26,66 @@ SignalStatus upfirdn(ArrayRef<f64> x, ArrayRef<f64> h, usize p, usize q, MutArra
     if (lx == 0 || lh == 0) {
         return SignalStatus::kOk;
     }
-    const usize up_len = (lx - 1) * p + 1;
-    const usize conv_len = up_len + lh - 1;
-    const usize out_len = (conv_len + q - 1) / q;
+    const usize out_len = upfirdn_length(lx, lh, p, q);
     if (out.size() < out_len) {
         return SignalStatus::kInvalidArgument;
     }
 
-    Array<f64> conv(conv_len, 0.0, alloc);
-    for (usize i = 0; i < lx; ++i) {
-        const f64 xi = x[i];
-        if (xi == 0.0) continue;
-        const usize base = i * p;
-        for (usize j = 0; j < lh; ++j) {
-            conv[base + j] += xi * h[j];
+    // Polyphase reversed-subfilter decomposition: pack each phase's taps in
+    // reverse order so every output sample reduces to a contiguous unit-stride
+    // dot product without allocating or computing dropped samples.
+    Array<usize> sub_off(p, alloc);
+    Array<usize> sub_len(p, alloc);
+    usize total_packed = 0;
+    for (usize ph = 0; ph < p; ++ph) {
+        sub_off[ph] = total_packed;
+        const usize len = (ph < lh) ? ((lh - 1 - ph) / p + 1) : 0;
+        sub_len[ph] = len;
+        total_packed += len;
+    }
+    Array<f64> h_poly(total_packed, alloc);
+    for (usize ph = 0; ph < p; ++ph) {
+        const usize len = sub_len[ph];
+        f64* hp = h_poly.data() + sub_off[ph];
+        for (usize u = 0; u < len; ++u) {
+            hp[u] = h[ph + (len - 1 - u) * p];
         }
     }
-    for (usize k = 0; k < out_len; ++k) {
-        out[k] = conv[k * q];
+
+    const f64* x_base = x.data();
+    const i64 ilx = as<i64>(lx);
+    for (usize m = 0; m < out_len; ++m) {
+        const usize n = m * q;
+        const usize ph = n % p;
+        const usize len = sub_len[ph];
+        if (len == 0) {
+            out[m] = 0.0;
+            continue;
+        }
+        const i64 k_hi = as<i64>(n / p);
+        const i64 k_start = k_hi - as<i64>(len - 1);
+        const i64 u_lo = (k_start < 0) ? -k_start : 0;
+        const i64 u_hi = min(as<i64>(len), ilx - k_start);
+        if (u_lo >= u_hi) {
+            out[m] = 0.0;
+            continue;
+        }
+        const f64* xp = x_base + (k_start + u_lo);
+        const f64* hp = h_poly.data() + sub_off[ph] + u_lo;
+        const usize cnt = as<usize>(u_hi - u_lo);
+        f64 a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+        usize u = 0;
+        for (; u + 4 <= cnt; u += 4) {
+            a0 += xp[u] * hp[u];
+            a1 += xp[u + 1] * hp[u + 1];
+            a2 += xp[u + 2] * hp[u + 2];
+            a3 += xp[u + 3] * hp[u + 3];
+        }
+        f64 acc = (a0 + a1) + (a2 + a3);
+        for (; u < cnt; ++u) {
+            acc += xp[u] * hp[u];
+        }
+        out[m] = acc;
     }
     return SignalStatus::kOk;
 }

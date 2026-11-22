@@ -605,6 +605,19 @@ void test_multirate() {
         CHECK_NEAR(ypq[i], full[i * q], 1e-12);
     }
 
+    // upfirdn pure decimation p=1, q=4 with longer filter matches explicit conv
+    const f64 xd[12] = {1, -2, 3, 4, -1, 2, 5, -3, 0.5, 1.5, -0.5, 2.5};
+    const f64 hd[7] = {0.1, 0.2, 0.3, 0.4, 0.3, 0.2, 0.1};
+    f64 cdec[18]{};
+    CHECK(sig::conv_1d(xd, hd, cdec) == sig::SignalStatus::kOk);
+    const usize dec_len = sig::upfirdn_length(12, 7, 1, 4);
+    CHECK(dec_len == 5);
+    f64 ydec[5]{};
+    CHECK(sig::upfirdn(xd, hd, 1, 4, ydec) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < dec_len; ++i) {
+        CHECK_NEAR(ydec[i], cdec[i * 4], 1e-12);
+    }
+
     // fftfilt matches direct FIR filter_df2t (real and complex)
     f64 sig_x[100]{};
     for (usize i = 0; i < 100; ++i) {
