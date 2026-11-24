@@ -3,6 +3,7 @@
 #include "keel/arena.h"
 #include "keel/array.h"
 #include "keel/math.h"
+#include "keel/poly.h"
 
 namespace keel::signal {
 
@@ -310,6 +311,582 @@ SignalStatus sosfiltfilt_col_major(ArrayRef<f64> sos, usize num_sections, ArrayR
 
     reverse_f64(bwd);
     copy_f64(y, ArrayRef<f64>(bwd).slice(edge, n));
+    return SignalStatus::kOk;
+}
+
+SignalStatus filtfilt(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> x, MutArrayRef<f64> y,
+                      Allocator* alloc) {
+    const usize nb = b.size();
+    const usize na = a.size();
+    const usize nx = x.size();
+    if (y.size() < nx) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (na == 0 || a[0] == 0.0) {
+        return SignalStatus::kZeroLeadingCoeff;
+    }
+    if (nx == 0) {
+        return SignalStatus::kOk;
+    }
+
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    const f64 a0 = a[0];
+    Array<f64> bn(nb, scratch.allocator());
+    Array<f64> an(na, scratch.allocator());
+    for (usize i = 0; i < nb; ++i) bn[i] = b[i] / a0;
+    for (usize i = 0; i < na; ++i) an[i] = a[i] / a0;
+
+    const usize nfilt = keel::max(nb, na);
+    const usize state_len = (nfilt > 0) ? (nfilt - 1) : 0;
+
+    Array<f64> zi(state_len, 0.0, scratch.allocator());
+    if (state_len > 0) {
+        Array<f64> rhs(state_len, 0.0, scratch.allocator());
+        f64 sum_rhs = 0.0;
+        f64 sum_a = 1.0;
+        const f64 b0 = (nb > 0) ? bn[0] : 0.0;
+        for (usize k = 0; k < state_len; ++k) {
+            const f64 bk1 = (k + 1 < nb) ? bn[k + 1] : 0.0;
+            const f64 ak1 = (k + 1 < na) ? an[k + 1] : 0.0;
+            rhs[k] = bk1 - b0 * ak1;
+            sum_rhs += rhs[k];
+            sum_a += ak1;
+        }
+        if (keel::abs(sum_a) > 1e-14) {
+            zi[0] = sum_rhs / sum_a;
+            for (usize k = 0; k + 1 < state_len; ++k) {
+                const f64 ak1 = (k + 1 < na) ? an[k + 1] : 0.0;
+                zi[k + 1] = zi[k] + ak1 * zi[0] - rhs[k];
+            }
+        }
+    }
+
+    usize n_edge = 3 * state_len;
+    if (n_edge >= nx) {
+        n_edge = nx - 1;
+    }
+    const usize ext_len = nx + 2 * n_edge;
+    Array<f64> ext(ext_len, scratch.allocator());
+    for (usize i = 0; i < n_edge; ++i) {
+        ext[i] = 2.0 * x[0] - x[n_edge - i];
+    }
+    for (usize i = 0; i < nx; ++i) {
+        ext[n_edge + i] = x[i];
+    }
+    for (usize i = 0; i < n_edge; ++i) {
+        ext[n_edge + nx + i] = 2.0 * x[nx - 1] - x[nx - 2 - i];
+    }
+
+    Array<f64> zi_scaled(state_len, 0.0, scratch.allocator());
+    for (usize k = 0; k < state_len; ++k) {
+        zi_scaled[k] = zi[k] * ext[0];
+    }
+    Array<f64> fwd(ext_len, scratch.allocator());
+    SignalStatus st = filter_df2t(bn.as_ref(), an.as_ref(), ext.as_ref(), fwd.as_mut_ref(),
+                                  zi_scaled.as_ref(), {}, scratch.allocator());
+    if (st != SignalStatus::kOk) return st;
+
+    reverse_f64(fwd.as_mut_ref());
+    for (usize k = 0; k < state_len; ++k) {
+        zi_scaled[k] = zi[k] * fwd[0];
+    }
+    Array<f64> bwd(ext_len, scratch.allocator());
+    st = filter_df2t(bn.as_ref(), an.as_ref(), fwd.as_ref(), bwd.as_mut_ref(),
+                     zi_scaled.as_ref(), {}, scratch.allocator());
+    if (st != SignalStatus::kOk) return st;
+
+    reverse_f64(bwd.as_mut_ref());
+    copy_f64(y, ArrayRef<f64>(bwd).slice(n_edge, nx));
+    return SignalStatus::kOk;
+}
+
+namespace {
+
+inline c64 eval_freqz_real_at(ArrayRef<f64> b, ArrayRef<f64> a, f64 w) noexcept {
+    const c64 ejw(keel::cos(w), -keel::sin(w));
+    c64 num(0.0, 0.0);
+    c64 den(0.0, 0.0);
+    c64 ejwk(1.0, 0.0);
+    for (usize i = 0; i < b.size(); ++i) {
+        num += c64(b[i], 0.0) * ejwk;
+        ejwk *= ejw;
+    }
+    ejwk = c64(1.0, 0.0);
+    for (usize i = 0; i < a.size(); ++i) {
+        den += c64(a[i], 0.0) * ejwk;
+        ejwk *= ejw;
+    }
+    return num / den;
+}
+
+inline c64 eval_freqz_c64_at(ArrayRef<c64> b, ArrayRef<c64> a, f64 w) noexcept {
+    const c64 ejw(keel::cos(w), -keel::sin(w));
+    c64 num(0.0, 0.0);
+    c64 den(0.0, 0.0);
+    c64 ejwk(1.0, 0.0);
+    for (usize i = 0; i < b.size(); ++i) {
+        num += b[i] * ejwk;
+        ejwk *= ejw;
+    }
+    ejwk = c64(1.0, 0.0);
+    for (usize i = 0; i < a.size(); ++i) {
+        den += a[i] * ejwk;
+        ejwk *= ejw;
+    }
+    return num / den;
+}
+
+void unwrap_phase_pi(MutArrayRef<f64> p) noexcept {
+    const usize n = p.size();
+    if (n < 2) return;
+    f64 offset = 0.0;
+    for (usize i = 1; i < n; ++i) {
+        const f64 diff = p[i] + offset - p[i - 1];
+        if (diff > kPi) {
+            offset -= kTau;
+        } else if (diff < -kPi) {
+            offset += kTau;
+        }
+        p[i] += offset;
+    }
+}
+
+bool is_trivial_denom(ArrayRef<f64> a) noexcept {
+    if (a.empty()) return true;
+    if (keel::abs(a[0] - 1.0) > 1e-12) return false;
+    for (usize i = 1; i < a.size(); ++i) {
+        if (keel::abs(a[i]) > 1e-12) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+SignalStatus freqz(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> w,
+                   MutArrayRef<c64> h_out) noexcept {
+    const usize n = w.size();
+    if (h_out.size() < n) return SignalStatus::kInvalidArgument;
+    for (usize k = 0; k < n; ++k) {
+        h_out[k] = eval_freqz_real_at(b, a, w[k]);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus freqz_c64(ArrayRef<c64> b, ArrayRef<c64> a, ArrayRef<f64> w,
+                       MutArrayRef<c64> h_out) noexcept {
+    const usize n = w.size();
+    if (h_out.size() < n) return SignalStatus::kInvalidArgument;
+    for (usize k = 0; k < n; ++k) {
+        h_out[k] = eval_freqz_c64_at(b, a, w[k]);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus freqz_grid(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, bool whole, f64 fs,
+                        MutArrayRef<c64> h_out, MutArrayRef<f64> freq_out) noexcept {
+    if (h_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (npts == 0) return SignalStatus::kOk;
+    const f64 span = whole ? kTau : kPi;
+    const f64 hz_span = whole ? fs : (0.5 * fs);
+    const f64 inv_n = 1.0 / as<f64>(npts);
+    for (usize k = 0; k < npts; ++k) {
+        const f64 fk = as<f64>(k);
+        const f64 w = span * fk * inv_n;
+        if (!freq_out.empty()) {
+            freq_out[k] = (fs > 0.0) ? (hz_span * fk * inv_n) : w;
+        }
+        h_out[k] = eval_freqz_real_at(b, a, w);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus freqz_grid_c64(ArrayRef<c64> b, ArrayRef<c64> a, usize npts, bool whole, f64 fs,
+                            MutArrayRef<c64> h_out, MutArrayRef<f64> freq_out) noexcept {
+    if (h_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (npts == 0) return SignalStatus::kOk;
+    const f64 span = whole ? kTau : kPi;
+    const f64 hz_span = whole ? fs : (0.5 * fs);
+    const f64 inv_n = 1.0 / as<f64>(npts);
+    for (usize k = 0; k < npts; ++k) {
+        const f64 fk = as<f64>(k);
+        const f64 w = span * fk * inv_n;
+        if (!freq_out.empty()) {
+            freq_out[k] = (fs > 0.0) ? (hz_span * fk * inv_n) : w;
+        }
+        h_out[k] = eval_freqz_c64_at(b, a, w);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus phasez(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, f64 fs,
+                    MutArrayRef<f64> phi_out, MutArrayRef<f64> freq_out) noexcept {
+    if (phi_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (npts == 0) return SignalStatus::kOk;
+    const f64 hz_span = 0.5 * fs;
+    const f64 inv_n = 1.0 / as<f64>(npts);
+    constexpr f64 kZeroEps = 1e-300;
+    for (usize k = 0; k < npts; ++k) {
+        const f64 fk = as<f64>(k);
+        const f64 w = kPi * fk * inv_n;
+        if (!freq_out.empty()) {
+            freq_out[k] = (fs > 0.0) ? (hz_span * fk * inv_n) : w;
+        }
+        const c64 h = eval_freqz_real_at(b, a, w);
+        const f64 mag2 = h.real() * h.real() + h.imag() * h.imag();
+        phi_out[k] = (mag2 < kZeroEps) ? Limits<f64>::quiet_nan() : keel::atan2(h.imag(), h.real());
+    }
+    unwrap_phase_pi(phi_out.slice(0, npts));
+    return SignalStatus::kOk;
+}
+
+SignalStatus phasez_c64(ArrayRef<c64> b, ArrayRef<c64> a, usize npts, f64 fs,
+                        MutArrayRef<f64> phi_out, MutArrayRef<f64> freq_out) noexcept {
+    if (phi_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (npts == 0) return SignalStatus::kOk;
+    const f64 hz_span = 0.5 * fs;
+    const f64 inv_n = 1.0 / as<f64>(npts);
+    constexpr f64 kZeroEps = 1e-300;
+    for (usize k = 0; k < npts; ++k) {
+        const f64 fk = as<f64>(k);
+        const f64 w = kPi * fk * inv_n;
+        if (!freq_out.empty()) {
+            freq_out[k] = (fs > 0.0) ? (hz_span * fk * inv_n) : w;
+        }
+        const c64 h = eval_freqz_c64_at(b, a, w);
+        const f64 mag2 = h.real() * h.real() + h.imag() * h.imag();
+        phi_out[k] = (mag2 < kZeroEps) ? Limits<f64>::quiet_nan() : keel::atan2(h.imag(), h.real());
+    }
+    unwrap_phase_pi(phi_out.slice(0, npts));
+    return SignalStatus::kOk;
+}
+
+SignalStatus grpdelay(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, f64 fs,
+                      MutArrayRef<f64> gd_out, MutArrayRef<f64> freq_out, Allocator* alloc) {
+    if (gd_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize nb = b.size();
+    const usize na = a.size();
+    if (npts == 0 || nb == 0 || na == 0) {
+        for (usize k = 0; k < npts; ++k) {
+            gd_out[k] = 0.0;
+            if (!freq_out.empty()) freq_out[k] = 0.0;
+        }
+        return SignalStatus::kOk;
+    }
+
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    const usize nc = nb + na - 1;
+    Array<f64> c(nc, 0.0, scratch.allocator());
+    for (usize i = 0; i < nb; ++i) {
+        for (usize j = 0; j < na; ++j) {
+            c[i + j] += b[i] * a[na - 1 - j];
+        }
+    }
+
+    const f64 offset = as<f64>(na) - 1.0;
+    const f64 hz_span = 0.5 * fs;
+    const f64 inv_n = 1.0 / as<f64>(npts);
+    for (usize k = 0; k < npts; ++k) {
+        const f64 fk = as<f64>(k);
+        const f64 w = kPi * fk * inv_n;
+        if (!freq_out.empty()) {
+            freq_out[k] = (fs > 0.0) ? (hz_span * fk * inv_n) : w;
+        }
+        const c64 ejw(keel::cos(w), -keel::sin(w));
+        c64 C(0.0, 0.0);
+        c64 CR(0.0, 0.0);
+        c64 ejwk(1.0, 0.0);
+        for (usize n = 0; n < nc; ++n) {
+            C += c[n] * ejwk;
+            CR += (as<f64>(n) * c[n]) * ejwk;
+            ejwk *= ejw;
+        }
+        const f64 cmag2 = C.real() * C.real() + C.imag() * C.imag();
+        gd_out[k] = (cmag2 < 1e-300) ? 0.0 : ((CR / C).real() - offset);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus impzlength(ArrayRef<f64> b, ArrayRef<f64> a, usize& out_len, Allocator* alloc) {
+    if (is_trivial_denom(a)) {
+        out_len = keel::max<usize>(b.size(), 1);
+        return SignalStatus::kOk;
+    }
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    f64 rho = 0.0;
+    if (a.size() >= 2) {
+        const Array<c64> r = keel::poly::roots(a, scratch.allocator());
+        for (usize i = 0; i < r.size(); ++i) {
+            rho = keel::max(rho, keel::abs(r[i]));
+        }
+    }
+    if (!(rho > 0.0)) {
+        out_len = keel::max<usize>(b.size(), 1);
+        return SignalStatus::kOk;
+    }
+    if (rho >= 1.0) {
+        out_len = 8192;
+        return SignalStatus::kOk;
+    }
+    constexpr f64 kDecayThresh = 5e-5;
+    const f64 n_est = keel::log(kDecayThresh) / keel::log(rho);
+    i64 n_int = as<i64>(keel::floor(n_est));
+    if (n_int < 1) n_int = 1;
+    if (n_int > 8192) n_int = 8192;
+    out_len = as<usize>(n_int);
+    return SignalStatus::kOk;
+}
+
+SignalStatus impz(ArrayRef<f64> b, ArrayRef<f64> a, usize n, MutArrayRef<f64> h_out,
+                  MutArrayRef<f64> t_out, Allocator* alloc) {
+    if (h_out.size() < n || (!t_out.empty() && t_out.size() < n)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (a.empty() || a[0] == 0.0) {
+        return SignalStatus::kZeroLeadingCoeff;
+    }
+    if (n == 0) return SignalStatus::kOk;
+
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<f64> bn(b.size(), scratch.allocator());
+    Array<f64> an(a.size(), scratch.allocator());
+    const f64 a0 = a[0];
+    for (usize i = 0; i < b.size(); ++i) bn[i] = b[i] / a0;
+    for (usize i = 0; i < a.size(); ++i) an[i] = a[i] / a0;
+
+    Array<f64> x(n, 0.0, scratch.allocator());
+    x[0] = 1.0;
+    const SignalStatus st =
+        filter_df2t(bn.as_ref(), an.as_ref(), x.as_ref(), h_out.slice(0, n), {}, {},
+                    scratch.allocator());
+    if (st != SignalStatus::kOk) return st;
+    if (!t_out.empty()) {
+        for (usize i = 0; i < n; ++i) t_out[i] = as<f64>(i);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus stepz(ArrayRef<f64> b, ArrayRef<f64> a, usize n, MutArrayRef<f64> s_out,
+                   MutArrayRef<f64> t_out, Allocator* alloc) {
+    if (s_out.size() < n || (!t_out.empty() && t_out.size() < n)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (a.empty() || a[0] == 0.0) {
+        return SignalStatus::kZeroLeadingCoeff;
+    }
+    if (n == 0) return SignalStatus::kOk;
+
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<f64> bn(b.size(), scratch.allocator());
+    Array<f64> an(a.size(), scratch.allocator());
+    const f64 a0 = a[0];
+    for (usize i = 0; i < b.size(); ++i) bn[i] = b[i] / a0;
+    for (usize i = 0; i < a.size(); ++i) an[i] = a[i] / a0;
+
+    Array<f64> x(n, 1.0, scratch.allocator());
+    const SignalStatus st =
+        filter_df2t(bn.as_ref(), an.as_ref(), x.as_ref(), s_out.slice(0, n), {}, {},
+                    scratch.allocator());
+    if (st != SignalStatus::kOk) return st;
+    if (!t_out.empty()) {
+        for (usize i = 0; i < n; ++i) t_out[i] = as<f64>(i);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus phasedelay(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, MutArrayRef<f64> pd_out,
+                        MutArrayRef<f64> w_out) noexcept {
+    if (pd_out.size() < npts || w_out.size() < npts) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const SignalStatus st = phasez(b, a, npts, 0.0, pd_out, w_out);
+    if (st != SignalStatus::kOk) return st;
+    const f64 nan_val = Limits<f64>::quiet_nan();
+    for (usize i = 0; i < npts; ++i) {
+        pd_out[i] = (w_out[i] == 0.0) ? nan_val : (-pd_out[i] / w_out[i]);
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus zerophase(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, MutArrayRef<f64> hr_out,
+                       MutArrayRef<f64> w_out) noexcept {
+    if (hr_out.size() < npts || (!w_out.empty() && w_out.size() < npts)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (npts == 0) return SignalStatus::kOk;
+    const f64 tau = (b.size() > 0) ? (as<f64>(b.size()) - 1.0) * 0.5 : 0.0;
+    const f64 inv_n = 1.0 / as<f64>(npts);
+    for (usize k = 0; k < npts; ++k) {
+        const f64 w = kPi * as<f64>(k) * inv_n;
+        if (!w_out.empty()) w_out[k] = w;
+        const c64 h = eval_freqz_real_at(b, a, w);
+        const c64 twist = keel::polar(1.0, w * tau);
+        hr_out[k] = (h * twist).real();
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus polyscale(ArrayRef<f64> p_col_major, usize rows, usize cols, ArrayRef<f64> scale,
+                       MutArrayRef<f64> out_col_major, Allocator* alloc) {
+    if (rows == 0 || cols == 0) return SignalStatus::kOk;
+    const usize total = rows * cols;
+    if (p_col_major.size() < total || out_col_major.size() < total) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const bool scalar_s = (scale.size() == 1);
+    if (!scalar_s && scale.size() != cols) {
+        return SignalStatus::kInvalidArgument;
+    }
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<f64> factor(cols, 1.0, scratch.allocator());
+    if (scalar_s) {
+        const f64 a = scale[0];
+        for (usize k = 1; k < cols; ++k) {
+            factor[k] = factor[k - 1] * a;
+        }
+    } else {
+        for (usize k = 1; k < cols; ++k) {
+            const f64 base = scale[k];
+            f64 acc = 1.0;
+            for (usize e = 0; e < k; ++e) acc *= base;
+            factor[k] = acc;
+        }
+    }
+    for (usize k = 0; k < cols; ++k) {
+        const f64 fk = factor[k];
+        for (usize i = 0; i < rows; ++i) {
+            const usize lin = k * rows + i;
+            out_col_major[lin] = p_col_major[lin] * fk;
+        }
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus polyscale_c64(ArrayRef<c64> p_col_major, usize rows, usize cols, ArrayRef<c64> scale,
+                           MutArrayRef<c64> out_col_major, Allocator* alloc) {
+    if (rows == 0 || cols == 0) return SignalStatus::kOk;
+    const usize total = rows * cols;
+    if (p_col_major.size() < total || out_col_major.size() < total) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const bool scalar_s = (scale.size() == 1);
+    if (!scalar_s && scale.size() != cols) {
+        return SignalStatus::kInvalidArgument;
+    }
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<c64> factor(cols, c64(1.0, 0.0), scratch.allocator());
+    if (scalar_s) {
+        const c64 a = scale[0];
+        for (usize k = 1; k < cols; ++k) {
+            factor[k] = factor[k - 1] * a;
+        }
+    } else {
+        for (usize k = 1; k < cols; ++k) {
+            const c64 base = scale[k];
+            c64 acc(1.0, 0.0);
+            for (usize e = 0; e < k; ++e) acc *= base;
+            factor[k] = acc;
+        }
+    }
+    for (usize k = 0; k < cols; ++k) {
+        const c64 fk = factor[k];
+        for (usize i = 0; i < rows; ++i) {
+            const usize lin = k * rows + i;
+            out_col_major[lin] = p_col_major[lin] * fk;
+        }
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus polystab(ArrayRef<f64> a, Array<f64>& out, Allocator* alloc) {
+    const usize n = a.size();
+    out = Array<f64>(alloc);
+    if (n == 0) return SignalStatus::kOk;
+    if (n == 1) {
+        out.push_back(a[0]);
+        return SignalStatus::kOk;
+    }
+    f64 gain = 0.0;
+    bool found = false;
+    for (usize k = 0; k < n; ++k) {
+        if (a[k] != 0.0) {
+            gain = a[k];
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        out.resize(n);
+        for (usize k = 0; k < n; ++k) out[k] = 0.0;
+        return SignalStatus::kOk;
+    }
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<c64> r = keel::poly::roots(a, scratch.allocator());
+    if (r.empty()) {
+        out.push_back(gain);
+        return SignalStatus::kOk;
+    }
+    for (usize k = 0; k < r.size(); ++k) {
+        const f64 mag = keel::abs(r[k]);
+        if (mag > 1.0) {
+            r[k] = r[k] / (mag * mag);
+        }
+    }
+    Array<f64> monic = keel::poly::from_roots(r.as_ref(), scratch.allocator());
+    out.resize(monic.size());
+    for (usize k = 0; k < monic.size(); ++k) {
+        out[k] = monic[k] * gain;
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus polystab_c64(ArrayRef<c64> a, Array<c64>& out, Allocator* alloc) {
+    const usize n = a.size();
+    out = Array<c64>(alloc);
+    if (n == 0) return SignalStatus::kOk;
+    if (n == 1) {
+        out.push_back(a[0]);
+        return SignalStatus::kOk;
+    }
+    c64 gain(0.0, 0.0);
+    bool found = false;
+    for (usize k = 0; k < n; ++k) {
+        if (a[k] != c64(0.0, 0.0)) {
+            gain = a[k];
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        out.resize(n, c64(0.0, 0.0));
+        return SignalStatus::kOk;
+    }
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<c64> r = keel::poly::roots(a, scratch.allocator());
+    if (r.empty()) {
+        out.push_back(gain);
+        return SignalStatus::kOk;
+    }
+    for (usize k = 0; k < r.size(); ++k) {
+        const f64 mag = keel::abs(r[k]);
+        if (mag > 1.0) {
+            r[k] = r[k] / (mag * mag);
+        }
+    }
+    Array<c64> monic = keel::poly::from_roots_c64(r.as_ref(), scratch.allocator());
+    out.resize(monic.size());
+    for (usize k = 0; k < monic.size(); ++k) {
+        out[k] = monic[k] * gain;
+    }
     return SignalStatus::kOk;
 }
 

@@ -1,7 +1,9 @@
 #include "keel/signal.h"
 
+#include "keel/arena.h"
 #include "keel/array.h"
 #include "keel/fft.h"
+#include "keel/math.h"
 
 namespace keel::signal {
 
@@ -185,6 +187,108 @@ SignalStatus fftfilt_c64(ArrayRef<c64> b, ArrayRef<c64> x, usize nfft, MutArrayR
         for (usize i = 0; i < blk_out && pos + i < nx; ++i) {
             out[pos + i] += xf[i];
         }
+    }
+    return SignalStatus::kOk;
+}
+
+SignalStatus decimate(ArrayRef<f64> x, usize factor, Array<f64>& out, Allocator* alloc) {
+    const usize nx = x.size();
+    if (factor <= 1 || nx == 0) {
+        out = Array<f64>(x, alloc);
+        return SignalStatus::kOk;
+    }
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    const f64 wn_val = 0.8 / as<f64>(factor);
+    TfResult tf;
+    SignalStatus st = cheby1(8, 0.05, ArrayRef<f64>(&wn_val, 1), FilterType::kLowpass, false, tf,
+                             scratch.allocator());
+    if (st != SignalStatus::kOk) return st;
+
+    Array<f64> filtered(nx, 0.0, scratch.allocator());
+    st = filtfilt(tf.b.as_ref(), tf.a.as_ref(), x, filtered.as_mut_ref(), scratch.allocator());
+    if (st != SignalStatus::kOk) return st;
+
+    const usize out_len = (nx + factor - 1) / factor;
+    const usize nbeg = (nx - 1) % factor;
+    out = Array<f64>(out_len, 0.0, alloc);
+    for (usize i = 0; i < out_len; ++i) {
+        out[i] = filtered[nbeg + i * factor];
+    }
+    return SignalStatus::kOk;
+}
+
+constexpr usize gcd_usize(usize a, usize b) noexcept {
+    while (b != 0) {
+        const usize t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+SignalStatus resample(ArrayRef<f64> x, usize p, usize q, i32 n_order, f64 beta, Array<f64>& y_out,
+                      Array<f64>* b_out, Allocator* alloc) {
+    if (p == 0 || q == 0) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize g = gcd_usize(p, q);
+    p /= g;
+    q /= g;
+
+    const usize nx = x.size();
+    const i32 n_eff = (n_order > 0) ? n_order : 10;
+    const usize pqmax = keel::max(p, q);
+    const f64 fc = 1.0 / (2.0 * as<f64>(pqmax));
+    const f64 w_cut = 2.0 * fc;
+    const i32 l_len = 2 * n_eff * as<i32>(pqmax) + 1;
+    const i32 m_half = (l_len - 1) / 2;
+
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<f64> kw(as<usize>(l_len), 0.0, scratch.allocator());
+    kaiser(kw.as_mut_ref(), beta);
+
+    Array<f64> fk(as<usize>(l_len), 0.0, scratch.allocator());
+    f64 sum_fk = 0.0;
+    for (i32 i = 0; i < l_len; ++i) {
+        const i32 k = i - m_half;
+        const f64 fbv = (k == 0)
+                            ? w_cut
+                            : (keel::sin(kPi * w_cut * as<f64>(k)) / (kPi * as<f64>(k)));
+        fk[as<usize>(i)] = fbv * kw[as<usize>(i)];
+        sum_fk += fk[as<usize>(i)];
+    }
+
+    const f64 scale = as<f64>(p) / sum_fk;
+    if (b_out != nullptr) {
+        *b_out = Array<f64>(as<usize>(l_len), 0.0, alloc);
+        for (i32 i = 0; i < l_len; ++i) {
+            (*b_out)[as<usize>(i)] = scale * fk[as<usize>(i)];
+        }
+    }
+
+    const i64 l_half = (l_len - 1) / 2;
+    const i64 nz = as<i64>(q) - (l_half % as<i64>(q));
+    const i64 l_half2 = l_half + nz;
+
+    const usize hh_len = as<usize>(nz) + as<usize>(l_len);
+    Array<f64> hh(hh_len, 0.0, scratch.allocator());
+    for (i32 i = 0; i < l_len; ++i) {
+        hh[as<usize>(nz) + as<usize>(i)] = scale * fk[as<usize>(i)];
+    }
+
+    const usize yfn = upfirdn_length(nx, hh_len, p, q);
+    Array<f64> yfull(yfn, 0.0, scratch.allocator());
+    const SignalStatus st =
+        upfirdn(x, hh.as_ref(), p, q, yfull.as_mut_ref(), scratch.allocator());
+    if (st != SignalStatus::kOk) return st;
+
+    const i64 delay = l_half2 / as<i64>(q);
+    const i64 ly = as<i64>((nx * p + q - 1) / q);
+    const usize out_len = (ly > 0) ? as<usize>(ly) : 0;
+    y_out = Array<f64>(out_len, 0.0, alloc);
+    for (usize i = 0; i < out_len; ++i) {
+        const i64 idx = delay + as<i64>(i);
+        y_out[i] = (idx >= 0 && as<usize>(idx) < yfn) ? yfull[as<usize>(idx)] : 0.0;
     }
     return SignalStatus::kOk;
 }

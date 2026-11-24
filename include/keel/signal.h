@@ -466,4 +466,509 @@ enum class FirFtype : u8 {
                                  FirFtype ftype, MutArrayRef<f64> out_b, f64& out_err,
                                  Allocator* alloc = nullptr);
 
+// Zero-phase forward-backward IIR filter (`y.size() >= x.size()`) with odd-reflection
+// edge padding (`min(3 * (max(b.size(), a.size()) - 1), x.size() - 1)`) and steady-state
+// initial conditions. Returns kZeroLeadingCoeff if `a.empty()` or `a[0] == 0`.
+[[nodiscard]] SignalStatus filtfilt(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> x,
+                                    MutArrayRef<f64> y, Allocator* alloc = nullptr);
+
+// Digital filter frequency response H(e^{j*w}) = B(e^{-j*w}) / A(e^{-j*w}).
+// Evaluated at explicit radian frequencies `w` (`h_out.size() >= w.size()`).
+[[nodiscard]] SignalStatus freqz(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> w,
+                                 MutArrayRef<c64> h_out) noexcept;
+[[nodiscard]] SignalStatus freqz_c64(ArrayRef<c64> b, ArrayRef<c64> a, ArrayRef<f64> w,
+                                     MutArrayRef<c64> h_out) noexcept;
+
+// Digital filter frequency response on `npts` equispaced grid points over [0, pi)
+// (or [0, 2*pi) when `whole == true`). When `fs > 0`, `freq_out` is in Hz.
+[[nodiscard]] SignalStatus freqz_grid(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, bool whole,
+                                      f64 fs, MutArrayRef<c64> h_out,
+                                      MutArrayRef<f64> freq_out) noexcept;
+[[nodiscard]] SignalStatus freqz_grid_c64(ArrayRef<c64> b, ArrayRef<c64> a, usize npts, bool whole,
+                                          f64 fs, MutArrayRef<c64> h_out,
+                                          MutArrayRef<f64> freq_out) noexcept;
+
+// Unwrapped phase response on `npts` points over [0, pi) (Hz if `fs > 0`).
+[[nodiscard]] SignalStatus phasez(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, f64 fs,
+                                  MutArrayRef<f64> phi_out, MutArrayRef<f64> freq_out) noexcept;
+[[nodiscard]] SignalStatus phasez_c64(ArrayRef<c64> b, ArrayRef<c64> a, usize npts, f64 fs,
+                                      MutArrayRef<f64> phi_out, MutArrayRef<f64> freq_out) noexcept;
+
+// Exact group delay (in samples) via combined polynomial c = conv(b, reverse(a)).
+[[nodiscard]] SignalStatus grpdelay(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, f64 fs,
+                                    MutArrayRef<f64> gd_out, MutArrayRef<f64> freq_out,
+                                    Allocator* alloc = nullptr);
+
+// Impulse response decay length (5e-5 threshold, capped at 8192 for unstable/marginally stable IIR).
+[[nodiscard]] SignalStatus impzlength(ArrayRef<f64> b, ArrayRef<f64> a, usize& out_len,
+                                      Allocator* alloc = nullptr);
+
+// Impulse and unit-step responses (`n` samples; writes `h_out` / `s_out` and optional `t_out`).
+[[nodiscard]] SignalStatus impz(ArrayRef<f64> b, ArrayRef<f64> a, usize n, MutArrayRef<f64> h_out,
+                                MutArrayRef<f64> t_out = {}, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus stepz(ArrayRef<f64> b, ArrayRef<f64> a, usize n, MutArrayRef<f64> s_out,
+                                 MutArrayRef<f64> t_out = {}, Allocator* alloc = nullptr);
+
+// Phase delay -phi(w)/w (NaN at w == 0) and zero-phase response Hr(w).
+[[nodiscard]] SignalStatus phasedelay(ArrayRef<f64> b, ArrayRef<f64> a, usize npts,
+                                      MutArrayRef<f64> pd_out, MutArrayRef<f64> w_out) noexcept;
+[[nodiscard]] SignalStatus zerophase(ArrayRef<f64> b, ArrayRef<f64> a, usize npts,
+                                     MutArrayRef<f64> hr_out, MutArrayRef<f64> w_out) noexcept;
+
+// Polynomial root radial scaling: b[i, k] = p[i, k] * factor(k), where `p` is `rows x cols`
+// column-major and `scale` has length 1 (factor(k) = scale[0]^k) or `cols` (scale[k]^k).
+[[nodiscard]] SignalStatus polyscale(ArrayRef<f64> p_col_major, usize rows, usize cols,
+                                     ArrayRef<f64> scale, MutArrayRef<f64> out_col_major,
+                                     Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus polyscale_c64(ArrayRef<c64> p_col_major, usize rows, usize cols,
+                                         ArrayRef<c64> scale, MutArrayRef<c64> out_col_major,
+                                         Allocator* alloc = nullptr);
+
+// Minimum-phase polynomial stabilization: reflects roots with |r| > 1 to 1 / conj(r).
+[[nodiscard]] SignalStatus polystab(ArrayRef<f64> a, Array<f64>& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus polystab_c64(ArrayRef<c64> a, Array<c64>& out,
+                                        Allocator* alloc = nullptr);
+
+// ============================================================================
+// Filter Representation Conversions (ZPK / TF / SOS / State-Space)
+// ============================================================================
+
+struct SosResult {
+    Array<f64> sos_col_major; // L x 6 column-major
+    usize num_sections = 0;
+    f64 gain = 1.0;
+};
+
+struct StateSpaceResult {
+    Array<f64> a_col_major; // N x N column-major
+    Array<f64> b;           // N x 1
+    Array<f64> c;           // 1 x N
+    f64 d = 0.0;
+    usize order = 0;
+};
+
+// Convert zeros/poles/gain to L x 6 column-major SOS cascade.
+// When `surplus_at_origin == true` (zp2sos), sections with no finite zeros receive [0 0 1];
+// when `false` (tf2sos), surplus zeros stay left-aligned at infinity [1 0 0].
+// Gain is returned in `out.gain` (unit leading section gain; caller scales row 0 if desired).
+[[nodiscard]] SignalStatus zp2sos(ArrayRef<c64> zeros, ArrayRef<c64> poles, f64 gain,
+                                  bool surplus_at_origin, SosResult& out,
+                                  Allocator* alloc = nullptr);
+
+// Convert transfer function b/a to L x 6 column-major SOS cascade + gain.
+[[nodiscard]] SignalStatus tf2sos(ArrayRef<c64> b, ArrayRef<c64> a, SosResult& out,
+                                  Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus tf2sos(ArrayRef<f64> b, ArrayRef<f64> a, SosResult& out,
+                                  Allocator* alloc = nullptr);
+
+// Convert L x 6 column-major SOS cascade + gain to transfer function (b, a).
+[[nodiscard]] SignalStatus sos2tf(ArrayRef<f64> sos_col_major, usize num_sections, f64 gain,
+                                  TfResult& out, Allocator* alloc = nullptr);
+
+// Convert L x 6 column-major SOS cascade + gain to zero-pole-gain (z, p, k).
+[[nodiscard]] SignalStatus sos2zp(ArrayRef<f64> sos_col_major, usize num_sections, f64 gain,
+                                  ZpkResult& out, Allocator* alloc = nullptr);
+
+// Controllable canonical state-space realization of proper SISO transfer function b/a (na >= 2).
+[[nodiscard]] SignalStatus tf2ss(ArrayRef<f64> b, ArrayRef<f64> a, StateSpaceResult& out,
+                                 Allocator* alloc = nullptr);
+
+// SISO state-space to transfer function via Faddeev-LeVerrier (`a_col_major` is N x N).
+[[nodiscard]] SignalStatus ss2tf(ArrayRef<f64> a_col_major, usize order, ArrayRef<f64> b,
+                                 ArrayRef<f64> c, f64 d, TfResult& out,
+                                 Allocator* alloc = nullptr);
+
+// ============================================================================
+// Convolution, Deconvolution & Correlation Extensions
+// ============================================================================
+
+enum class XcorrScale : u8 {
+    kNone = 0,
+    kBiased,
+    kUnbiased,
+    kCoeff,
+};
+
+// Automatic direct/FFT 1-D linear convolution (`out.size() >= a.size() + b.size() - 1`).
+[[nodiscard]] SignalStatus conv_1d_auto(ArrayRef<f64> a, ArrayRef<f64> b, MutArrayRef<f64> out,
+                                        Allocator* alloc = nullptr);
+
+// Modulo-n circular convolution (`n == 0` uses linear length `x.size() + y.size() - 1`).
+[[nodiscard]] SignalStatus cconv(ArrayRef<f64> x, ArrayRef<f64> y, usize n, MutArrayRef<f64> out,
+                                 Allocator* alloc = nullptr);
+
+// Polynomial deconvolution b = conv(a, q) + r.
+// If `a.size() > b.size()`, writes q = [0] and r = b.
+[[nodiscard]] SignalStatus deconv(ArrayRef<f64> b, ArrayRef<f64> a, Array<f64>& q_out,
+                                  Array<f64>& r_out, Allocator* alloc = nullptr);
+
+// Full cross-correlation (`len = 2 * max(nx, ny) - 1`, lags `-(max-1)..+(max-1)`).
+// `lags_out` may be empty if lags are not needed.
+[[nodiscard]] SignalStatus xcorr(ArrayRef<f64> x, ArrayRef<f64> y, MutArrayRef<f64> r_out,
+                                 MutArrayRef<f64> lags_out = {}, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus xcorr_c64(ArrayRef<c64> x, ArrayRef<c64> y, MutArrayRef<c64> r_out,
+                                     MutArrayRef<f64> lags_out = {}, Allocator* alloc = nullptr);
+
+// Cross-covariance (mean-removed cross-correlation with optional `maxlag` and scaling).
+// `maxlag < 0` uses full lag `max(nx, ny) - 1`.
+[[nodiscard]] SignalStatus xcov(ArrayRef<f64> x, ArrayRef<f64> y, i32 maxlag, XcorrScale scale,
+                                Array<f64>& c_out, Array<f64>& lags_out,
+                                Allocator* alloc = nullptr);
+
+// 2-D cross-correlation (column-major `ra x ca` and `rb x cb` -> `(ra+rb-1) x (ca+cb-1)`).
+[[nodiscard]] SignalStatus xcorr2(ArrayRef<f64> a, usize ra, usize ca, ArrayRef<f64> b, usize rb,
+                                  usize cb, MutArrayRef<f64> out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus xcorr2_c64(ArrayRef<c64> a, usize ra, usize ca, ArrayRef<c64> b,
+                                      usize rb, usize cb, MutArrayRef<c64> out) noexcept;
+
+// Estimate integer sample delay between `x` and `y` (`max_lag <= 0` searches all lags).
+[[nodiscard]] SignalStatus finddelay(ArrayRef<f64> x, ArrayRef<f64> y, i64 max_lag, i64& out_delay,
+                                     Allocator* alloc = nullptr);
+
+// ============================================================================
+// Additional Transforms: DFT Matrix, DST, Cepstrum & Chirp Z-Transform
+// ============================================================================
+
+// N x N column-major DFT matrix W(k, n) = exp(-2*pi*i * k * n / N).
+[[nodiscard]] SignalStatus dftmtx(usize n, MutArrayRef<c64> out_col_major) noexcept;
+
+// Type-II Discrete Sine Transform and its inverse (`out.size() >= x.size()`).
+[[nodiscard]] SignalStatus dst(ArrayRef<f64> x, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus idst(ArrayRef<f64> y, MutArrayRef<f64> out) noexcept;
+
+// Real cepstrum and minimum-phase reconstruction (exact length N via Bluestein/radix-2 FFT).
+[[nodiscard]] SignalStatus rceps(ArrayRef<f64> x, MutArrayRef<f64> out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus rceps_minphase(ArrayRef<f64> x, MutArrayRef<f64> cep_out,
+                                          MutArrayRef<f64> minphase_out,
+                                          Allocator* alloc = nullptr);
+
+// Complex cepstrum (optional `nd_out` receives circular delay removed) and inverse complex cepstrum.
+[[nodiscard]] SignalStatus cceps(ArrayRef<f64> x, MutArrayRef<f64> out, f64* nd_out = nullptr,
+                                 Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus icceps(ArrayRef<f64> c, MutArrayRef<f64> out,
+                                  Allocator* alloc = nullptr);
+
+// Chirp Z-Transform via Bluestein convolution: Y[k] = sum_{n=0}^{N-1} x[n] * a^{-n} * w^{n*k}.
+// `czt_batch` processes `n_cols` contiguous column-major signals of length `n_rows`, sharing
+// the precomputed chirp FFT across all columns (`out_col_major` is `m x n_cols`).
+[[nodiscard]] SignalStatus czt(ArrayRef<c64> x, usize m, c64 w, c64 a, MutArrayRef<c64> out,
+                               Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus czt_batch(ArrayRef<c64> x_col_major, usize n_rows, usize n_cols, usize m,
+                                     c64 w, c64 a, MutArrayRef<c64> out_col_major,
+                                     Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus czt_batch_real(ArrayRef<f64> x_col_major, usize n_rows, usize n_cols,
+                                          usize m, c64 w, c64 a, MutArrayRef<c64> out_col_major,
+                                          Allocator* alloc = nullptr);
+
+// ============================================================================
+// Multirate Extensions (decimate & resample)
+// ============================================================================
+
+// Anti-aliased integer decimation (order-8 Chebyshev I, Rp=0.05 dB, zero-phase filtfilt).
+[[nodiscard]] SignalStatus decimate(ArrayRef<f64> x, usize factor, Array<f64>& out,
+                                    Allocator* alloc = nullptr);
+
+// Rational resampling by p/q using Kaiser-windowed ideal sinc anti-alias filter + polyphase upfirdn.
+// `n_order <= 0` defaults to 10. Optional `b_out` receives the anti-alias FIR taps when non-null.
+[[nodiscard]] SignalStatus resample(ArrayRef<f64> x, usize p, usize q, i32 n_order, f64 beta,
+                                    Array<f64>& y_out, Array<f64>* b_out = nullptr,
+                                    Allocator* alloc = nullptr);
+
+// ============================================================================
+// Parametric Signal Modeling & Subspace Pseudospectra
+// ============================================================================
+
+struct LevinsonResult {
+    Array<f64> a;
+    f64 e = 0.0;
+    Array<f64> k;
+};
+
+struct RlevinsonResult {
+    Array<f64> r;
+    Array<f64> k;
+};
+
+// Levinson-Durbin recursion (`order < 0` uses `r.size() - 1`).
+[[nodiscard]] SignalStatus levinson(ArrayRef<f64> r, i32 order, LevinsonResult& out,
+                                    Allocator* alloc = nullptr);
+
+// Step-down reverse Levinson: recover autocorrelation R and reflection coeffs k from (a, efinal).
+[[nodiscard]] SignalStatus rlevinson(ArrayRef<f64> a, f64 efinal, RlevinsonResult& out,
+                                     Allocator* alloc = nullptr);
+
+// AR model estimation: Yule-Walker, Burg, Covariance, Modified Covariance.
+[[nodiscard]] SignalStatus aryule(ArrayRef<f64> x, i32 order, LevinsonResult& out,
+                                  Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus arburg(ArrayRef<f64> x, i32 order, LevinsonResult& out,
+                                  Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus arcov(ArrayRef<f64> x, i32 order, Array<f64>& a_out, f64& e_out,
+                                 Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus armcov(ArrayRef<f64> x, i32 order, Array<f64>& a_out, f64& e_out,
+                                  Allocator* alloc = nullptr);
+
+// Autocorrelation / reflection / polynomial / inverse-sine / log-area-ratio conversions.
+[[nodiscard]] SignalStatus schurrc(ArrayRef<f64> r, Array<f64>& k_out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus rc2ac(ArrayRef<f64> k, f64 r0, Array<f64>& r_out,
+                                 Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus poly2rc(ArrayRef<f64> a, f64 efinal, Array<f64>& k_out, f64& r0_out,
+                                   Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus rc2poly(ArrayRef<f64> k, f64 r0, Array<f64>& a_out, f64& efinal_out,
+                                   Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus is2rc(ArrayRef<f64> is_in, MutArrayRef<f64> k_out) noexcept;
+[[nodiscard]] SignalStatus rc2is(ArrayRef<f64> k, MutArrayRef<f64> is_out) noexcept;
+[[nodiscard]] SignalStatus lar2rc(ArrayRef<f64> g, MutArrayRef<f64> k_out) noexcept;
+[[nodiscard]] SignalStatus rc2lar(ArrayRef<f64> k, MutArrayRef<f64> g_out) noexcept;
+
+// Prony and Steiglitz-McBride IIR time-domain modeling.
+// In `stmcb`, empty `x_opt` models unit-impulse response; empty `ai_opt` initializes via Prony.
+[[nodiscard]] SignalStatus prony(ArrayRef<f64> h, i32 nb, i32 na, TfResult& out,
+                                 Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus stmcb(ArrayRef<f64> y, ArrayRef<f64> x_opt, i32 nb, i32 na, i32 niter,
+                                 ArrayRef<f64> ai_opt, TfResult& out, Allocator* alloc = nullptr);
+
+// Autocorrelation data matrix X ((N + m) x (m + 1), column-major) with X' * X = R.
+[[nodiscard]] SignalStatus corrmtx(ArrayRef<f64> x, i32 m, MutArrayRef<f64> out_col_major) noexcept;
+
+// Line Spectral Frequencies <-> AR polynomial conversions.
+[[nodiscard]] SignalStatus poly2lsf(ArrayRef<f64> a, Array<f64>& lsf_out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus lsf2poly(ArrayRef<f64> lsf, Array<f64>& a_out,
+                                    Allocator* alloc = nullptr);
+
+// Frequency-domain Levi equation-error LSQ rational fitting (s-domain & z-domain).
+[[nodiscard]] SignalStatus invfreqs(ArrayRef<c64> h, ArrayRef<f64> w, i32 nb, i32 na, TfResult& out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus invfreqz(ArrayRef<c64> h, ArrayRef<f64> w, i32 nb, i32 na, TfResult& out,
+                                    Allocator* alloc = nullptr);
+
+// MUSIC & Eigenvector subspace pseudospectra (`p_out` & `f_out` length `nfft / 2 + 1`).
+[[nodiscard]] SignalStatus pmusic(ArrayRef<f64> x, i32 p, i32 nfft, f64 fs, MutArrayRef<f64> p_out,
+                                  MutArrayRef<f64> f_out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus peig(ArrayRef<f64> x, i32 p, i32 nfft, f64 fs, MutArrayRef<f64> p_out,
+                                MutArrayRef<f64> f_out, Allocator* alloc = nullptr);
+
+// ============================================================================
+// Spectral Metrics, pspectrum, Instantaneous Frequency & Vibration Analysis
+// ============================================================================
+
+struct ObwResult {
+    f64 bw = 0.0;
+    f64 flo = 0.0;
+    f64 fhi = 0.0;
+    f64 power = 0.0;
+};
+
+enum class PspectrumMode : u8 {
+    kPower = 0,
+    kSpectrogram,
+};
+
+struct PspectrumOptions {
+    PspectrumMode mode = PspectrumMode::kPower;
+    f64 leakage = 0.5;
+    f64 overlap_percent = -1.0;  // < 0 => auto from leakage
+    f64 time_resolution = -1.0;  // <= 0 => auto
+    f64 fmin = Limits<f64>::quiet_nan();
+    f64 fmax = Limits<f64>::quiet_nan();
+    bool two_sided = false;
+    bool has_two_sided = false;
+    bool is_norm_freq = true;
+    f64 fs = kTau;
+    f64 t0 = 0.0;
+};
+
+struct PspectrumResult {
+    Array<f64> p_col_major; // n_freq x n_cols
+    usize n_freq = 0;
+    usize n_cols = 0;
+    Array<f64> f;           // n_freq
+    Array<f64> t;           // n_cols (empty in power mode)
+};
+
+struct RainflowCycle {
+    f64 count = 0.0;
+    f64 range = 0.0;
+    f64 mean = 0.0;
+    f64 start_idx = 0.0;
+    f64 end_idx = 0.0;
+};
+
+// Bandpower from precomputed PSD (rectangular full-range or clipped trapezoidal over [f_lo, f_hi]).
+[[nodiscard]] SignalStatus bandpower_psd(ArrayRef<f64> pxx, ArrayRef<f64> f, f64 f_lo, f64 f_hi,
+                                         bool use_range, f64& out_power) noexcept;
+
+// Time-series spectral measurements (`fs <= 0` => normalized radian frequency [0, pi]).
+[[nodiscard]] SignalStatus bandpower_time(ArrayRef<f64> x, f64 fs, f64 f_lo, f64 f_hi,
+                                          f64& out_power, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus meanfreq_time(ArrayRef<f64> x, f64 fs, f64& out_freq,
+                                         Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus medfreq_time(ArrayRef<f64> x, f64 fs, f64& out_freq,
+                                        Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus enbw(ArrayRef<f64> window, f64 fs, f64& out_bw) noexcept;
+[[nodiscard]] SignalStatus obw_time(ArrayRef<f64> x, f64 fs, f64 pct, ObwResult& out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus powerbw_time(ArrayRef<f64> x, f64 fs, f64& out_bw,
+                                        Allocator* alloc = nullptr);
+
+// Spectral shape descriptors.
+[[nodiscard]] SignalStatus spectral_crest(ArrayRef<f64> x, f64 fs, f64& out_val,
+                                          Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus spectral_flatness(ArrayRef<f64> x, f64 fs, f64& out_val,
+                                             Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus spectral_entropy(ArrayRef<f64> x, f64 fs, f64& out_val,
+                                            Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus spectral_kurtosis(ArrayRef<f64> x, f64 fs, f64& out_val,
+                                             Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus spectral_skewness(ArrayRef<f64> x, f64 fs, f64& out_val,
+                                             Allocator* alloc = nullptr);
+
+// Harmonic distortion / SNR family (Kaiser beta=38 periodogram).
+[[nodiscard]] SignalStatus snr_time(ArrayRef<f64> x, f64 fs, f64& out_db,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus sinad_time(ArrayRef<f64> x, f64 fs, f64& out_db,
+                                      Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus thd_time(ArrayRef<f64> x, f64 fs, f64& out_db,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus sfdr_time(ArrayRef<f64> x, f64 fs, f64& out_db,
+                                     Allocator* alloc = nullptr);
+
+// Zoom-CZT power spectrum & spectrogram (`x_col_major` is `n_samples x n_channels`).
+[[nodiscard]] SignalStatus pspectrum_real(ArrayRef<f64> x_col_major, usize n_samples,
+                                          usize n_channels, const PspectrumOptions& opts,
+                                          PspectrumResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus pspectrum_c64(ArrayRef<c64> x_col_major, usize n_samples,
+                                         usize n_channels, const PspectrumOptions& opts,
+                                         PspectrumResult& out, Allocator* alloc = nullptr);
+
+// Instantaneous frequency (Hilbert & spectrogram first moment) and instantaneous bandwidth.
+[[nodiscard]] SignalStatus instfreq_hilbert(ArrayRef<f64> x, f64 fs, f64 t0,
+                                            MutArrayRef<f64> f_out, MutArrayRef<f64> t_out,
+                                            Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus instfreq_from_spec(ArrayRef<f64> p_col_major, usize n_freq, usize n_time,
+                                              ArrayRef<f64> f, MutArrayRef<f64> out_if) noexcept;
+[[nodiscard]] SignalStatus instbw_from_spec(ArrayRef<f64> p_col_major, usize n_freq, usize n_time,
+                                            ArrayRef<f64> f, MutArrayRef<f64> out_ibw) noexcept;
+
+// Vibration analysis: envelope spectrum, tachometer RPM, ASTM E1049-85 rainflow, TSA.
+[[nodiscard]] SignalStatus envspectrum(ArrayRef<f64> x, f64 fs, Array<f64>& es_out,
+                                       Array<f64>& f_out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus tachorpm(ArrayRef<f64> x, f64 fs, bool has_threshold, f64 threshold,
+                                    i32 ppr, Array<f64>& rpm_out, Array<f64>& time_out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus rainflow(ArrayRef<f64> x, Array<RainflowCycle>& cycles_out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus tsa(ArrayRef<f64> x, f64 fs, ArrayRef<f64> rpm, f64 fs_rpm,
+                               i32 n_per_rev, Array<f64>& avg_out, Array<f64>& theta_out,
+                               Allocator* alloc = nullptr);
+
+// ============================================================================
+// Waveform Generation & Analog Modulation
+// ============================================================================
+
+enum class PulstranKind : u8 {
+    kRectpuls = 0,
+    kTripuls,
+    kGauspuls,
+};
+
+enum class ChirpMethod : u8 {
+    kLinear = 0,
+    kQuadratic,
+    kLogarithmic,
+};
+
+enum class ChirpQuadShape : u8 {
+    kDefault = 0,
+    kConvex,
+    kConcave,
+};
+
+enum class ModulationMethod : u8 {
+    kAm = 0,
+    kAmdsbTc,
+    kAmssb,
+    kFm,
+    kPm,
+};
+
+[[nodiscard]] SignalStatus rectpuls(ArrayRef<f64> t, f64 w, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus tripuls(ArrayRef<f64> t, f64 w, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus gauspuls(ArrayRef<f64> t, f64 fc, f64 bw, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus pulstran_builtin(ArrayRef<f64> t, ArrayRef<f64> d, PulstranKind kind,
+                                            f64 fc_or_w, f64 bw, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus square(ArrayRef<f64> t, f64 duty, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus sawtooth(ArrayRef<f64> t, f64 width, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus sinc(ArrayRef<f64> t, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus gmonopuls(ArrayRef<f64> t, f64 fc, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus diric(ArrayRef<f64> x, i32 n, MutArrayRef<f64> out) noexcept;
+[[nodiscard]] SignalStatus chirp(ArrayRef<f64> t, f64 f0, f64 t1, f64 f1, ChirpMethod method,
+                                 f64 phi_deg, ChirpQuadShape quad_shape,
+                                 MutArrayRef<f64> out) noexcept;
+
+// Multi-channel column-major (`len x cols`) analog modulation / demodulation / VCO.
+[[nodiscard]] SignalStatus modulate(ArrayRef<f64> x_col_major, usize len, usize cols, f64 fc,
+                                    f64 fs, ModulationMethod method, bool has_opt, f64 opt,
+                                    MutArrayRef<f64> out_col_major, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus demod(ArrayRef<f64> y_col_major, usize len, usize cols, f64 fc, f64 fs,
+                                 ModulationMethod method, bool has_opt, f64 opt,
+                                 MutArrayRef<f64> out_col_major, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus vco(ArrayRef<f64> x_col_major, usize len, usize cols, f64 fc, f64 range1,
+                               f64 fs, MutArrayRef<f64> out_col_major) noexcept;
+
+// ============================================================================
+// Pulse Transition Metrics & Signal Regions of Interest (ROI)
+// ============================================================================
+
+struct StateLevels {
+    f64 low = 0.0;
+    f64 high = 0.0;
+};
+
+struct RiseFallResult {
+    Array<f64> dur;
+    Array<f64> lt;
+    Array<f64> ut;
+    f64 ll = 0.0;
+    f64 ul = 0.0;
+};
+
+struct SigRoi {
+    i64 start = 0; // 1-based inclusive
+    i64 end = 0;   // 1-based inclusive
+};
+
+[[nodiscard]] SignalStatus statelevels(ArrayRef<f64> x, StateLevels& out) noexcept;
+[[nodiscard]] SignalStatus midcross(ArrayRef<f64> x, f64 fs, Array<f64>& out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus risetime_full(ArrayRef<f64> x, f64 fs, bool rising, RiseFallResult& out,
+                                         Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus slewrate(ArrayRef<f64> x, f64 fs, Array<f64>& out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus overshoot(ArrayRef<f64> x, Array<f64>& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus undershoot(ArrayRef<f64> x, Array<f64>& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus settlingtime(ArrayRef<f64> x, f64 fs, f64 tol, Array<f64>& out,
+                                        Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus pulsewidth(ArrayRef<f64> x, f64 fs, Array<f64>& out,
+                                      Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus pulseperiod(ArrayRef<f64> x, f64 fs, Array<f64>& out,
+                                       Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus pulsesep(ArrayRef<f64> x, f64 fs, Array<f64>& out,
+                                    Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus dutycycle(ArrayRef<f64> x, Array<f64>& out, Allocator* alloc = nullptr);
+
+// Signal ROI utilities (1-based inclusive [start, end] pairs).
+[[nodiscard]] SignalStatus binmask2sigroi(ArrayRef<u8> mask, Array<SigRoi>& out,
+                                          Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus sigroi2binmask(ArrayRef<SigRoi> rois, i64 len_user, Array<u8>& out_mask,
+                                          Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus extendsigroi(ArrayRef<SigRoi> rois, i64 l_pre, i64 l_post,
+                                        Array<SigRoi>& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus shortensigroi(ArrayRef<SigRoi> rois, i64 l_pre, i64 l_post,
+                                         Array<SigRoi>& out, Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus mergesigroi(ArrayRef<SigRoi> rois, i64 sep, Array<SigRoi>& out,
+                                       Allocator* alloc = nullptr);
+[[nodiscard]] SignalStatus removesigroi(ArrayRef<SigRoi> rois, i64 max_len, Array<SigRoi>& out,
+                                        Allocator* alloc = nullptr);
+
 } // namespace keel::signal

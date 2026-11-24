@@ -83,6 +83,11 @@ add_library(keel_signal STATIC
     src/iir_design.cpp
     src/multirate.cpp
     src/fir_design.cpp
+    src/conversions.cpp
+    src/modeling.cpp
+    src/spectral_metrics.cpp
+    src/waveforms.cpp
+    src/pulse_roi.cpp
 )
 add_library(keel::signal ALIAS keel_signal)
 

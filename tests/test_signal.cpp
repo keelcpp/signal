@@ -703,6 +703,369 @@ void test_fir_design() {
     CHECK_NEAR(hdiff[0], -hdiff[15], 1e-12);
 }
 
+void test_filter_analysis_and_poly() {
+    // 1. filtfilt zero-phase property on symmetric signal
+    const f64 wn = 0.25;
+    sig::TfResult tf;
+    CHECK(sig::butter(4, keel::ArrayRef<f64>(&wn, 1), sig::FilterType::kLowpass, false, tf) ==
+          sig::SignalStatus::kOk);
+    keel::Array<f64> x(128, 0.0);
+    for (usize i = 0; i < 128; ++i) {
+        x[i] = keel::sin(2.0 * keel::kPi * 0.03 * keel::as<f64>(i)) +
+               0.5 * keel::sin(2.0 * keel::kPi * 0.4 * keel::as<f64>(i));
+    }
+    keel::Array<f64> y(128, 0.0);
+    CHECK(sig::filtfilt(tf.b.as_ref(), tf.a.as_ref(), x.as_ref(), y.as_mut_ref()) ==
+          sig::SignalStatus::kOk);
+    // Low-frequency component should remain in phase at center samples
+    CHECK_NEAR(y[64], keel::sin(2.0 * keel::kPi * 0.03 * 64.0), 0.15);
+
+    // 2. freqz / phasez / grpdelay / phasedelay / zerophase
+    const f64 b_fir[5] = {0.2, 0.2, 0.2, 0.2, 0.2};
+    const f64 a_fir[1] = {1.0};
+    c64 h_grid[16]{};
+    f64 w_grid[16]{};
+    CHECK(sig::freqz_grid(b_fir, a_fir, 16, false, 0.0, h_grid, w_grid) ==
+          sig::SignalStatus::kOk);
+    CHECK_NEAR(h_grid[0].real(), 1.0, 1e-12);
+    CHECK_NEAR(h_grid[0].imag(), 0.0, 1e-12);
+
+    f64 gd[16]{};
+    CHECK(sig::grpdelay(b_fir, a_fir, 16, 0.0, gd, w_grid) == sig::SignalStatus::kOk);
+    CHECK_NEAR(gd[0], 2.0, 1e-12);
+    CHECK_NEAR(gd[1], 2.0, 1e-12);
+
+    f64 pd[16]{};
+    CHECK(sig::phasedelay(b_fir, a_fir, 16, pd, w_grid) == sig::SignalStatus::kOk);
+    CHECK(keel::is_nan(pd[0]));
+    CHECK_NEAR(pd[1], 2.0, 1e-12);
+
+    f64 hr[16]{};
+    CHECK(sig::zerophase(b_fir, a_fir, 16, hr, w_grid) == sig::SignalStatus::kOk);
+    CHECK_NEAR(hr[0], 1.0, 1e-12);
+
+    // 3. impzlength / impz / stepz
+    usize ilen = 0;
+    CHECK(sig::impzlength(tf.b.as_ref(), tf.a.as_ref(), ilen) == sig::SignalStatus::kOk);
+    CHECK(ilen > 10 && ilen <= 8192);
+    keel::Array<f64> hi(32, 0.0);
+    keel::Array<f64> ti(32, 0.0);
+    CHECK(sig::impz(b_fir, a_fir, 32, hi.as_mut_ref(), ti.as_mut_ref()) ==
+          sig::SignalStatus::kOk);
+    CHECK_NEAR(hi[0], 0.2, 1e-12);
+    CHECK_NEAR(hi[4], 0.2, 1e-12);
+    CHECK_NEAR(hi[5], 0.0, 1e-12);
+    CHECK(sig::stepz(b_fir, a_fir, 32, hi.as_mut_ref(), ti.as_mut_ref()) ==
+          sig::SignalStatus::kOk);
+    CHECK_NEAR(hi[10], 1.0, 1e-12);
+
+    // 4. polyscale / polystab
+    const f64 p_in[3] = {1.0, -3.0, 2.0}; // roots 1, 2
+    const f64 sc = 0.5;
+    f64 p_sc[3]{};
+    CHECK(sig::polyscale(p_in, 1, 3, keel::ArrayRef<f64>(&sc, 1), p_sc) ==
+          sig::SignalStatus::kOk);
+    CHECK_NEAR(p_sc[0], 1.0, 1e-12);
+    CHECK_NEAR(p_sc[1], -1.5, 1e-12);
+    CHECK_NEAR(p_sc[2], 0.5, 1e-12);
+
+    keel::Array<f64> p_st;
+    CHECK(sig::polystab(p_in, p_st) == sig::SignalStatus::kOk);
+    // Root 2 reflects to 0.5 -> (z - 1)(z - 0.5) = z^2 - 1.5z + 0.5
+    CHECK(p_st.size() == 3);
+    CHECK_NEAR(p_st[0], 1.0, 1e-9);
+    CHECK_NEAR(p_st[1], -1.5, 1e-9);
+    CHECK_NEAR(p_st[2], 0.5, 1e-9);
+}
+
+void test_conversions() {
+    const f64 wn = 0.3;
+    sig::TfResult tf;
+    CHECK(sig::butter(4, keel::ArrayRef<f64>(&wn, 1), sig::FilterType::kLowpass, false, tf) ==
+          sig::SignalStatus::kOk);
+
+    // tf2sos -> sos2tf roundtrip
+    sig::SosResult sos;
+    CHECK(sig::tf2sos(tf.b.as_ref(), tf.a.as_ref(), sos) == sig::SignalStatus::kOk);
+    CHECK(sos.num_sections == 2);
+
+    sig::TfResult tf2;
+    CHECK(sig::sos2tf(sos.sos_col_major.as_ref(), sos.num_sections, sos.gain, tf2) ==
+          sig::SignalStatus::kOk);
+    CHECK(tf2.b.size() == tf.b.size());
+    CHECK(tf2.a.size() == tf.a.size());
+    for (usize i = 0; i < tf.b.size(); ++i) {
+        CHECK_NEAR(tf2.b[i], tf.b[i], 1e-4); // 4-fold zero at z=-1
+        CHECK_NEAR(tf2.a[i], tf.a[i], 1e-9);
+    }
+
+    // sos2zp
+    sig::ZpkResult zpk;
+    CHECK(sig::sos2zp(sos.sos_col_major.as_ref(), sos.num_sections, sos.gain, zpk) ==
+          sig::SignalStatus::kOk);
+    CHECK(zpk.p.size() == 4);
+
+    // tf2ss -> ss2tf roundtrip
+    sig::StateSpaceResult ss;
+    CHECK(sig::tf2ss(tf.b.as_ref(), tf.a.as_ref(), ss) == sig::SignalStatus::kOk);
+    CHECK(ss.order == 4);
+    sig::TfResult tf3;
+    CHECK(sig::ss2tf(ss.a_col_major.as_ref(), ss.order, ss.b.as_ref(), ss.c.as_ref(), ss.d, tf3) ==
+          sig::SignalStatus::kOk);
+    for (usize i = 0; i < tf.b.size(); ++i) {
+        CHECK_NEAR(tf3.b[i], tf.b[i], 1e-8);
+        CHECK_NEAR(tf3.a[i], tf.a[i], 1e-8);
+    }
+}
+
+void test_conv_xcorr_transforms_multirate() {
+    // cconv & deconv
+    const f64 a[3] = {1.0, 2.0, 3.0};
+    const f64 b[2] = {4.0, 5.0};
+    f64 cc[4]{};
+    CHECK(sig::cconv(a, b, 0, cc) == sig::SignalStatus::kOk);
+    CHECK_NEAR(cc[0], 4.0, 1e-12);
+    CHECK_NEAR(cc[1], 13.0, 1e-12);
+    CHECK_NEAR(cc[2], 22.0, 1e-12);
+    CHECK_NEAR(cc[3], 15.0, 1e-12);
+
+    keel::Array<f64> q, r;
+    CHECK(sig::deconv(cc, b, q, r) == sig::SignalStatus::kOk);
+    CHECK(q.size() == 3);
+    CHECK_NEAR(q[0], 1.0, 1e-12);
+    CHECK_NEAR(q[1], 2.0, 1e-12);
+    CHECK_NEAR(q[2], 3.0, 1e-12);
+
+    // xcorr / finddelay / xcov / xcorr2
+    const f64 s1[8] = {0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0};
+    const f64 s2[8] = {0.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0, 0.0};
+    i64 delay = 0;
+    CHECK(sig::finddelay(s1, s2, 0, delay) == sig::SignalStatus::kOk);
+    CHECK(delay == 2);
+
+    keel::Array<f64> xc, xlags;
+    CHECK(sig::xcov(s1, s1, 3, sig::XcorrScale::kCoeff, xc, xlags) == sig::SignalStatus::kOk);
+    CHECK(xc.size() == 7);
+    CHECK_NEAR(xc[3], 1.0, 1e-12);
+
+    f64 m2[9]{};
+    const f64 m1[4] = {1.0, 2.0, 3.0, 4.0};
+    CHECK(sig::xcorr2(m1, 2, 2, m1, 2, 2, m2) == sig::SignalStatus::kOk);
+    CHECK_NEAR(m2[4], 30.0, 1e-12);
+
+    // dst / idst
+    f64 ds[4]{};
+    f64 ids[4]{};
+    const f64 v4[4] = {1.0, 2.0, 3.0, 4.0};
+    CHECK(sig::dst(v4, ds) == sig::SignalStatus::kOk);
+    CHECK(sig::idst(ds, ids) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 4; ++i) CHECK_NEAR(ids[i], v4[i], 1e-12);
+
+    // cceps / icceps roundtrip & rceps
+    const f64 seq[5] = {1.0, 0.5, 0.25, 0.1, 0.0};
+    f64 ce[5]{};
+    f64 rec[5]{};
+    f64 nd = 0.0;
+    CHECK(sig::cceps(seq, ce, &nd) == sig::SignalStatus::kOk);
+    CHECK(sig::icceps(ce, rec) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 5; ++i) CHECK_NEAR(rec[i], seq[i], 1e-10);
+
+    f64 rc[5]{};
+    f64 mp[5]{};
+    CHECK(sig::rceps_minphase(seq, rc, mp) == sig::SignalStatus::kOk);
+    CHECK(mp[0] > 0.0);
+
+    // czt matches DFT when w = exp(-2*pi*i/N), a = 1
+    c64 cx[4] = {c64(1.0, 0.0), c64(2.0, 0.0), c64(3.0, 0.0), c64(4.0, 0.0)};
+    c64 cy[4]{};
+    CHECK(sig::czt(cx, 4, keel::polar(1.0, -keel::kTau / 4.0), c64(1.0, 0.0), cy) ==
+          sig::SignalStatus::kOk);
+    CHECK_NEAR(cy[0].real(), 10.0, 1e-11);
+    CHECK_NEAR(cy[1].real(), -2.0, 1e-11);
+    CHECK_NEAR(cy[1].imag(), 2.0, 1e-11);
+
+    // decimate & resample
+    keel::Array<f64> sig64(64, 1.0);
+    keel::Array<f64> dec_out, res_y, res_b;
+    CHECK(sig::decimate(sig64.as_ref(), 2, dec_out) == sig::SignalStatus::kOk);
+    CHECK(dec_out.size() == 32);
+    // Order-8 Chebyshev I (Rp=0.05 dB) zero-phase DC gain = 10^(-0.1/20) ~= 0.98855
+    CHECK_NEAR(dec_out[16], 0.988553, 1e-3);
+
+    CHECK(sig::resample(sig64.as_ref(), 3, 2, 10, 5.0, res_y, &res_b) == sig::SignalStatus::kOk);
+    CHECK(res_y.size() == 96);
+    CHECK_NEAR(res_y[48], 1.0, 1e-2);
+}
+
+void test_modeling_and_subspace() {
+    // AR(2) process: x[n] = 0.75*x[n-1] - 0.5*x[n-2] + impulse/excitation
+    keel::Array<f64> x(256, 0.0);
+    x[0] = 1.0;
+    for (usize i = 1; i < 256; ++i) {
+        const f64 prev1 = x[i - 1];
+        const f64 prev2 = (i >= 2) ? x[i - 2] : 0.0;
+        x[i] = 0.75 * prev1 - 0.5 * prev2;
+    }
+
+    sig::LevinsonResult yw, bg;
+    CHECK(sig::aryule(x.as_ref(), 2, yw) == sig::SignalStatus::kOk);
+    CHECK(yw.a.size() == 3);
+    CHECK_NEAR(yw.a[1], -0.75, 0.05);
+    CHECK_NEAR(yw.a[2], 0.5, 0.05);
+
+    // Burg AR(2) on pure sinusoid cos(2*pi*0.1*n) -> exact a = [1, -2*cos(0.2*pi), 1]
+    keel::Array<f64> sin2(128, 0.0);
+    for (usize i = 0; i < 128; ++i) {
+        sin2[i] = keel::cos(keel::kTau * 0.1 * keel::as<f64>(i));
+    }
+    CHECK(sig::arburg(sin2.as_ref(), 2, bg) == sig::SignalStatus::kOk);
+    CHECK_NEAR(bg.a[1], -2.0 * keel::cos(keel::kTau * 0.1), 1e-2);
+    CHECK_NEAR(bg.a[2], 1.0, 1e-3);
+
+    keel::Array<f64> ac_a;
+    f64 ac_e = 0.0;
+    CHECK(sig::arcov(sin2.as_ref(), 2, ac_a, ac_e) == sig::SignalStatus::kOk);
+    CHECK_NEAR(ac_a[1], -2.0 * keel::cos(keel::kTau * 0.1), 1e-10);
+    CHECK_NEAR(ac_a[2], 1.0, 1e-10);
+
+    // poly2rc / rc2poly / poly2lsf / lsf2poly / rlevinson roundtrips
+    keel::Array<f64> k_rc, a_rec, lsf, a_lsf;
+    f64 r0 = 0.0;
+    f64 ef = 0.0;
+    const f64 a_true[3] = {1.0, -0.75, 0.5};
+    CHECK(sig::poly2rc(a_true, 0.25, k_rc, r0) == sig::SignalStatus::kOk);
+    CHECK(sig::rc2poly(k_rc.as_ref(), r0, a_rec, ef) == sig::SignalStatus::kOk);
+    CHECK_NEAR(ef, 0.25, 1e-12);
+    for (usize i = 0; i < 3; ++i) CHECK_NEAR(a_rec[i], a_true[i], 1e-12);
+
+    CHECK(sig::poly2lsf(a_true, lsf) == sig::SignalStatus::kOk);
+    CHECK(lsf.size() == 2);
+    CHECK(sig::lsf2poly(lsf.as_ref(), a_lsf) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 3; ++i) CHECK_NEAR(a_lsf[i], a_true[i], 1e-9);
+
+    sig::RlevinsonResult rlev;
+    CHECK(sig::rlevinson(a_true, 0.25, rlev) == sig::SignalStatus::kOk);
+    sig::LevinsonResult lev_back;
+    CHECK(sig::levinson(rlev.r.as_ref(), 2, lev_back) == sig::SignalStatus::kOk);
+    for (usize i = 0; i < 3; ++i) CHECK_NEAR(lev_back.a[i], a_true[i], 1e-11);
+
+    // prony & stmcb recover impulse response of 1 / (1 - 0.75 z^-1 + 0.5 z^-2)
+    sig::TfResult pr_res, st_res;
+    CHECK(sig::prony(x.as_ref(), 0, 2, pr_res) == sig::SignalStatus::kOk);
+    CHECK_NEAR(pr_res.b[0], 1.0, 1e-9);
+    CHECK_NEAR(pr_res.a[1], -0.75, 1e-9);
+    CHECK_NEAR(pr_res.a[2], 0.5, 1e-9);
+
+    CHECK(sig::stmcb(x.as_ref(), {}, 0, 2, 5, {}, st_res) == sig::SignalStatus::kOk);
+    CHECK_NEAR(st_res.a[1], -0.75, 1e-9);
+    CHECK_NEAR(st_res.a[2], 0.5, 1e-9);
+
+    // pmusic detects a single tone at 100 Hz (fs = 1000 Hz)
+    keel::Array<f64> tone(256, 0.0);
+    for (usize i = 0; i < 256; ++i) {
+        tone[i] = keel::cos(keel::kTau * 100.0 * keel::as<f64>(i) / 1000.0);
+    }
+    f64 pm[129]{};
+    f64 fm[129]{};
+    CHECK(sig::pmusic(tone.as_ref(), 2, 256, 1000.0, pm, fm) == sig::SignalStatus::kOk);
+    usize best_k = 0;
+    for (usize k = 1; k < 129; ++k) {
+        if (pm[k] > pm[best_k]) best_k = k;
+    }
+    CHECK_NEAR(fm[best_k], 100.0, 10.0);
+}
+
+void test_spectral_metrics_and_vibration() {
+    // Pure tone at 200 Hz, fs = 1000 Hz
+    const usize n = 1024;
+    const f64 fs = 1000.0;
+    keel::Array<f64> x(n, 0.0);
+    for (usize i = 0; i < n; ++i) {
+        x[i] = keel::sin(keel::kTau * 200.0 * keel::as<f64>(i) / fs);
+    }
+
+    f64 mf = 0.0;
+    f64 medf = 0.0;
+    f64 bp = 0.0;
+    CHECK(sig::meanfreq_time(x.as_ref(), fs, mf) == sig::SignalStatus::kOk);
+    CHECK(sig::medfreq_time(x.as_ref(), fs, medf) == sig::SignalStatus::kOk);
+    CHECK(sig::bandpower_time(x.as_ref(), fs, 150.0, 250.0, bp) == sig::SignalStatus::kOk);
+    CHECK_NEAR(mf, 200.0, 5.0);
+    CHECK_NEAR(medf, 200.0, 5.0);
+    CHECK_NEAR(bp, 0.5, 0.05);
+
+    sig::ObwResult obw_r;
+    CHECK(sig::obw_time(x.as_ref(), fs, 0.99, obw_r) == sig::SignalStatus::kOk);
+    CHECK(obw_r.flo < 200.0 && obw_r.fhi > 200.0);
+
+    // pspectrum power mode peak at 200 Hz
+    sig::PspectrumOptions opts;
+    opts.mode = sig::PspectrumMode::kPower;
+    opts.is_norm_freq = false;
+    opts.fs = fs;
+    sig::PspectrumResult ps;
+    CHECK(sig::pspectrum_real(x.as_ref(), n, 1, opts, ps) == sig::SignalStatus::kOk);
+    CHECK(ps.n_freq == 4096 && ps.n_cols == 1);
+    usize pk = 0;
+    for (usize k = 1; k < ps.n_freq; ++k) {
+        if (ps.p_col_major[k] > ps.p_col_major[pk]) pk = k;
+    }
+    CHECK_NEAR(ps.f[pk], 200.0, 2.0);
+
+    // rainflow simple sequence
+    const f64 rf_in[7] = {0.0, 2.0, -1.0, 3.0, -2.0, 1.0, 0.0};
+    keel::Array<sig::RainflowCycle> cycles;
+    CHECK(sig::rainflow(rf_in, cycles) == sig::SignalStatus::kOk);
+    CHECK(cycles.size() > 0);
+}
+
+void test_waveforms_and_pulse_roi() {
+    // sinc / square / sawtooth / chirp / diric
+    const f64 t5[5] = {-1.0, -0.5, 0.0, 0.5, 1.0};
+    f64 out5[5]{};
+    CHECK(sig::sinc(t5, out5) == sig::SignalStatus::kOk);
+    CHECK_NEAR(out5[2], 1.0, 1e-12);
+    CHECK_NEAR(out5[0], 0.0, 1e-12);
+
+    // modulate + demod roundtrip (PM)
+    const usize n = 256;
+    keel::Array<f64> msg(n, 0.0);
+    keel::Array<f64> mod_y(n, 0.0);
+    keel::Array<f64> dem_x(n, 0.0);
+    for (usize i = 0; i < n; ++i) {
+        msg[i] = 0.3 * keel::sin(keel::kTau * 5.0 * keel::as<f64>(i) / 1000.0);
+    }
+    CHECK(sig::modulate(msg.as_ref(), n, 1, 100.0, 1000.0, sig::ModulationMethod::kPm, true, 1.0,
+                        mod_y.as_mut_ref()) == sig::SignalStatus::kOk);
+    CHECK(sig::demod(mod_y.as_ref(), n, 1, 100.0, 1000.0, sig::ModulationMethod::kPm, true, 1.0,
+                     dem_x.as_mut_ref()) == sig::SignalStatus::kOk);
+    CHECK_NEAR(dem_x[128], msg[128], 0.05);
+
+    // Pulse metrics on clean square wave
+    keel::Array<f64> pulse(100, 0.0);
+    for (usize i = 20; i < 60; ++i) pulse[i] = 5.0;
+    sig::StateLevels sl;
+    CHECK(sig::statelevels(pulse.as_ref(), sl) == sig::SignalStatus::kOk);
+    CHECK_NEAR(sl.low, 0.0, 0.1);
+    CHECK_NEAR(sl.high, 5.0, 0.1);
+
+    keel::Array<f64> pw;
+    CHECK(sig::pulsewidth(pulse.as_ref(), 1.0, pw) == sig::SignalStatus::kOk);
+    CHECK(pw.size() == 1);
+    CHECK_NEAR(pw[0], 40.0, 0.5);
+
+    // SigROI roundtrip
+    const u8 mask[10] = {0, 1, 1, 1, 0, 0, 1, 1, 0, 0};
+    keel::Array<sig::SigRoi> rois, merged;
+    CHECK(sig::binmask2sigroi(mask, rois) == sig::SignalStatus::kOk);
+    CHECK(rois.size() == 2);
+    CHECK(rois[0].start == 2 && rois[0].end == 4);
+    CHECK(rois[1].start == 7 && rois[1].end == 8);
+    CHECK(sig::mergesigroi(rois.as_ref(), 2, merged) == sig::SignalStatus::kOk);
+    CHECK(merged.size() == 1);
+    CHECK(merged[0].start == 2 && merged[0].end == 8);
+}
+
 } // namespace
 
 int main() {
@@ -716,6 +1079,12 @@ int main() {
     test_iir_design();
     test_multirate();
     test_fir_design();
+    test_filter_analysis_and_poly();
+    test_conversions();
+    test_conv_xcorr_transforms_multirate();
+    test_modeling_and_subspace();
+    test_spectral_metrics_and_vibration();
+    test_waveforms_and_pulse_roi();
 
     if (g_failures == 0) {
         std::printf("ALL keel::signal TESTS PASSED\n");
