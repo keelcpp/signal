@@ -1,9 +1,8 @@
 #include "keel/signal.h"
 
 #include "keel/array.h"
+#include "keel/format.h"
 #include "keel/math.h"
-
-#include <cstdio>
 
 namespace {
 
@@ -14,15 +13,15 @@ i32 g_failures = 0;
 
 void check_true(bool cond, const char* expr, i32 line) {
     if (!cond) {
-        std::fprintf(stderr, "FAIL line %d: %s\n", line, expr);
+        keel::eprintln("FAIL line {}: {}", line, expr);
         ++g_failures;
     }
 }
 
 void check_near(f64 actual, f64 expected, f64 tol, const char* expr, i32 line) {
     if (!(keel::abs(actual - expected) <= tol)) {
-        std::fprintf(stderr, "FAIL line %d: %s (actual=%.15g, expected=%.15g, tol=%.3g)\n",
-                     line, expr, actual, expected, tol);
+        keel::eprintln("FAIL line {}: {} (actual={}, expected={}, tol={})",
+                       line, expr, actual, expected, tol);
         ++g_failures;
     }
 }
@@ -1087,9 +1086,9 @@ int main() {
     test_waveforms_and_pulse_roi();
 
     if (g_failures == 0) {
-        std::printf("ALL keel::signal TESTS PASSED\n");
+        keel::println("ALL keel::signal TESTS PASSED");
         return 0;
     }
-    std::fprintf(stderr, "TOTAL FAILURES: %d\n", g_failures);
+    keel::eprintln("TOTAL FAILURES: {}", g_failures);
     return 1;
 }
