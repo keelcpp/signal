@@ -116,13 +116,21 @@ SignalStatus statelevels(ArrayRef<f64> x, StateLevels& out) noexcept {
         out = {0.0, 0.0};
         return SignalStatus::kOk;
     }
-    f64 xmin = x[0];
-    f64 xmax = x[0];
-    for (usize i = 1; i < n; ++i) {
-        if (x[i] < xmin) xmin = x[i];
-        if (x[i] > xmax) xmax = x[i];
+    bool have_finite = false;
+    f64 xmin = 0.0;
+    f64 xmax = 0.0;
+    for (usize i = 0; i < n; ++i) {
+        if (!keel::is_finite(x[i])) continue;
+        if (!have_finite) {
+            xmin = x[i];
+            xmax = x[i];
+            have_finite = true;
+        } else {
+            if (x[i] < xmin) xmin = x[i];
+            if (x[i] > xmax) xmax = x[i];
+        }
     }
-    if (!(xmax > xmin)) {
+    if (!have_finite || !(xmax > xmin)) {
         out = {xmin, xmax};
         return SignalStatus::kOk;
     }
@@ -130,6 +138,7 @@ SignalStatus statelevels(ArrayRef<f64> x, StateLevels& out) noexcept {
     const f64 width = (xmax - xmin) / as<f64>(kHistBins);
     i32 hist[kHistBins]{};
     for (usize i = 0; i < n; ++i) {
+        if (!keel::is_finite(x[i])) continue;
         i32 b = as<i32>((x[i] - xmin) / width);
         if (b >= kHistBins) b = kHistBins - 1;
         if (b < 0) b = 0;
@@ -181,8 +190,7 @@ SignalStatus risetime_full(ArrayRef<f64> x, f64 fs, bool rising, RiseFallResult&
     ArenaTemp scratch = keel::get_scratch(alloc);
     const Array<Transition> trs = find_transitions(x, lh.low, lh.high, scratch.allocator());
 
-    const f64 f_eff = (fs > 0.0) ? fs : 1.0;
-    const f64 div_f = keel::max(f_eff, 1.0);
+    const f64 div_f = (fs > 0.0) ? fs : 1.0;
     const f64 range = lh.high - lh.low;
     out.ll = lh.low + kLowPct * range;
     out.ul = lh.low + kHighPct * range;
@@ -197,8 +205,8 @@ SignalStatus risetime_full(ArrayRef<f64> x, f64 fs, bool rising, RiseFallResult&
         const f64 lower_cross = rising ? t.start_idx : t.end_idx;
         const f64 upper_cross = rising ? t.end_idx : t.start_idx;
         out.dur.push_back((t.end_idx - t.start_idx) / div_f);
-        out.lt.push_back(idx_to_time(lower_cross, f_eff));
-        out.ut.push_back(idx_to_time(upper_cross, f_eff));
+        out.lt.push_back(idx_to_time(lower_cross, fs));
+        out.ut.push_back(idx_to_time(upper_cross, fs));
     }
     return SignalStatus::kOk;
 }
@@ -208,7 +216,7 @@ SignalStatus slewrate(ArrayRef<f64> x, f64 fs, Array<f64>& out, Allocator* alloc
     (void)statelevels(x, lh);
     ArenaTemp scratch = keel::get_scratch(alloc);
     const Array<Transition> trs = find_transitions(x, lh.low, lh.high, scratch.allocator());
-    const f64 div_f = keel::max(fs, 1.0);
+    const f64 div_f = (fs > 0.0) ? fs : 1.0;
     const f64 range = (lh.high - lh.low) * (kHighPct - kLowPct);
     out = Array<f64>(alloc);
     for (usize i = 0; i < trs.size(); ++i) {
@@ -272,7 +280,7 @@ SignalStatus settlingtime(ArrayRef<f64> x, f64 fs, f64 tol, Array<f64>& out, All
     if (range <= 0.0) return SignalStatus::kOk;
     ArenaTemp scratch = keel::get_scratch(alloc);
     const Array<Transition> trs = find_transitions(x, lh.low, lh.high, scratch.allocator());
-    const f64 div_f = keel::max(fs, 1.0);
+    const f64 div_f = (fs > 0.0) ? fs : 1.0;
     for (usize k = 0; k < trs.size(); ++k) {
         const Transition& t = trs[k];
         const f64 dest = (t.sign > 0) ? lh.high : lh.low;
@@ -295,7 +303,7 @@ SignalStatus pulsewidth(ArrayRef<f64> x, f64 fs, Array<f64>& out, Allocator* all
     const f64 mid = lh.low + kMidPct * (lh.high - lh.low);
     ArenaTemp scratch = keel::get_scratch(alloc);
     const Array<DirectedCross> crs = mid_crosses_directed(x, mid, scratch.allocator());
-    const f64 div_f = keel::max(fs, 1.0);
+    const f64 div_f = (fs > 0.0) ? fs : 1.0;
     out = Array<f64>(alloc);
     for (usize i = 0; i + 1 < crs.size(); ++i) {
         if (crs[i].dir == +1 && crs[i + 1].dir == -1) {
@@ -311,7 +319,7 @@ SignalStatus pulseperiod(ArrayRef<f64> x, f64 fs, Array<f64>& out, Allocator* al
     const f64 mid = lh.low + kMidPct * (lh.high - lh.low);
     ArenaTemp scratch = keel::get_scratch(alloc);
     const Array<DirectedCross> crs = mid_crosses_directed(x, mid, scratch.allocator());
-    const f64 div_f = keel::max(fs, 1.0);
+    const f64 div_f = (fs > 0.0) ? fs : 1.0;
     Array<f64> rising(scratch.allocator());
     for (usize i = 0; i < crs.size(); ++i) {
         if (crs[i].dir == +1) rising.push_back(crs[i].idx);
@@ -329,7 +337,7 @@ SignalStatus pulsesep(ArrayRef<f64> x, f64 fs, Array<f64>& out, Allocator* alloc
     const f64 mid = lh.low + kMidPct * (lh.high - lh.low);
     ArenaTemp scratch = keel::get_scratch(alloc);
     const Array<DirectedCross> crs = mid_crosses_directed(x, mid, scratch.allocator());
-    const f64 div_f = keel::max(fs, 1.0);
+    const f64 div_f = (fs > 0.0) ? fs : 1.0;
     out = Array<f64>(alloc);
     for (usize i = 0; i + 1 < crs.size(); ++i) {
         if (crs[i].dir == -1 && crs[i + 1].dir == +1) {
@@ -415,6 +423,7 @@ SignalStatus extendsigroi(ArrayRef<SigRoi> rois, i64 l_pre, i64 l_post, Array<Si
 
 SignalStatus shortensigroi(ArrayRef<SigRoi> rois, i64 l_pre, i64 l_post, Array<SigRoi>& out,
                            Allocator* alloc) {
+    if (l_pre < 0 || l_post < 0) return SignalStatus::kInvalidArgument;
     out = Array<SigRoi>(alloc);
     for (usize i = 0; i < rois.size(); ++i) {
         const i64 s = rois[i].start + l_pre;
@@ -431,16 +440,22 @@ SignalStatus mergesigroi(ArrayRef<SigRoi> rois, i64 sep, Array<SigRoi>& out, All
 
     ArenaTemp scratch = keel::get_scratch(alloc);
     Array<SigRoi> sorted(rois, scratch.allocator());
-    keel::sort(sorted, [](const SigRoi& a, const SigRoi& b) noexcept { return a.start < b.start; });
+    keel::sort(sorted, [](const SigRoi& a, const SigRoi& b) noexcept {
+        if (a.start != b.start) return a.start < b.start;
+        return a.end < b.end;
+    });
 
     for (usize k = 0; k < sorted.size(); ++k) {
         const i64 s = sorted[k].start;
         const i64 e = sorted[k].end;
-        if (!out.empty() && s - out[out.size() - 1].end <= sep + 1) {
-            if (e > out[out.size() - 1].end) out[out.size() - 1].end = e;
-        } else {
-            out.push_back(SigRoi{s, e});
+        if (!out.empty()) {
+            const i64 prev_end = out[out.size() - 1].end;
+            if (s <= prev_end || (s - prev_end - 1) <= sep) {
+                if (e > prev_end) out[out.size() - 1].end = e;
+                continue;
+            }
         }
+        out.push_back(SigRoi{s, e});
     }
     return SignalStatus::kOk;
 }

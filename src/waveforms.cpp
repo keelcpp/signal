@@ -14,7 +14,8 @@ inline f64 gauspuls_alpha(f64 fc, f64 bw) noexcept {
 }
 
 inline f64 rectpuls_scalar(f64 tv, f64 w) noexcept {
-    return (keel::abs(tv) < 0.5 * w) ? 1.0 : 0.0;
+    const f64 half = 0.5 * w;
+    return (tv >= -half && tv < half) ? 1.0 : 0.0;
 }
 
 inline f64 tripuls_scalar(f64 tv, f64 w) noexcept {
@@ -30,19 +31,22 @@ inline f64 gauspuls_scalar(f64 tv, f64 fc, f64 alpha) noexcept {
 } // namespace
 
 SignalStatus rectpuls(ArrayRef<f64> t, f64 w, MutArrayRef<f64> out) noexcept {
-    if (w <= 0.0 || out.size() < t.size()) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(w) || !(w > 0.0) || out.size() < t.size()) return SignalStatus::kInvalidArgument;
     for (usize i = 0; i < t.size(); ++i) out[i] = rectpuls_scalar(t[i], w);
     return SignalStatus::kOk;
 }
 
 SignalStatus tripuls(ArrayRef<f64> t, f64 w, MutArrayRef<f64> out) noexcept {
-    if (w <= 0.0 || out.size() < t.size()) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(w) || !(w > 0.0) || out.size() < t.size()) return SignalStatus::kInvalidArgument;
     for (usize i = 0; i < t.size(); ++i) out[i] = tripuls_scalar(t[i], w);
     return SignalStatus::kOk;
 }
 
 SignalStatus gauspuls(ArrayRef<f64> t, f64 fc, f64 bw, MutArrayRef<f64> out) noexcept {
-    if (fc <= 0.0 || bw <= 0.0 || out.size() < t.size()) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(fc) || !keel::is_finite(bw) || !(fc > 0.0) || !(bw > 0.0) ||
+        out.size() < t.size()) {
+        return SignalStatus::kInvalidArgument;
+    }
     const f64 alpha = gauspuls_alpha(fc, bw);
     for (usize i = 0; i < t.size(); ++i) out[i] = gauspuls_scalar(t[i], fc, alpha);
     return SignalStatus::kOk;
@@ -55,19 +59,21 @@ SignalStatus pulstran_builtin(ArrayRef<f64> t, ArrayRef<f64> d, PulstranKind kin
     for (usize i = 0; i < n; ++i) out[i] = 0.0;
 
     if (kind == PulstranKind::kRectpuls) {
-        if (fc_or_w <= 0.0) return SignalStatus::kInvalidArgument;
+        if (!keel::is_finite(fc_or_w) || !(fc_or_w > 0.0)) return SignalStatus::kInvalidArgument;
         for (usize k = 0; k < d.size(); ++k) {
             const f64 dk = d[k];
             for (usize i = 0; i < n; ++i) out[i] += rectpuls_scalar(t[i] - dk, fc_or_w);
         }
     } else if (kind == PulstranKind::kTripuls) {
-        if (fc_or_w <= 0.0) return SignalStatus::kInvalidArgument;
+        if (!keel::is_finite(fc_or_w) || !(fc_or_w > 0.0)) return SignalStatus::kInvalidArgument;
         for (usize k = 0; k < d.size(); ++k) {
             const f64 dk = d[k];
             for (usize i = 0; i < n; ++i) out[i] += tripuls_scalar(t[i] - dk, fc_or_w);
         }
     } else {
-        if (fc_or_w <= 0.0 || bw <= 0.0) return SignalStatus::kInvalidArgument;
+        if (!keel::is_finite(fc_or_w) || !keel::is_finite(bw) || !(fc_or_w > 0.0) || !(bw > 0.0)) {
+            return SignalStatus::kInvalidArgument;
+        }
         const f64 alpha = gauspuls_alpha(fc_or_w, bw);
         for (usize k = 0; k < d.size(); ++k) {
             const f64 dk = d[k];
@@ -78,7 +84,7 @@ SignalStatus pulstran_builtin(ArrayRef<f64> t, ArrayRef<f64> d, PulstranKind kin
 }
 
 SignalStatus square(ArrayRef<f64> t, f64 duty, MutArrayRef<f64> out) noexcept {
-    if (duty < 0.0 || duty > 100.0 || out.size() < t.size()) {
+    if (!keel::is_finite(duty) || !(duty >= 0.0 && duty <= 100.0) || out.size() < t.size()) {
         return SignalStatus::kInvalidArgument;
     }
     const f64 threshold = duty / 100.0;
@@ -91,7 +97,7 @@ SignalStatus square(ArrayRef<f64> t, f64 duty, MutArrayRef<f64> out) noexcept {
 }
 
 SignalStatus sawtooth(ArrayRef<f64> t, f64 width, MutArrayRef<f64> out) noexcept {
-    if (width < 0.0 || width > 1.0 || out.size() < t.size()) {
+    if (!keel::is_finite(width) || !(width >= 0.0 && width <= 1.0) || out.size() < t.size()) {
         return SignalStatus::kInvalidArgument;
     }
     for (usize i = 0; i < t.size(); ++i) {
@@ -125,7 +131,9 @@ SignalStatus sinc(ArrayRef<f64> t, MutArrayRef<f64> out) noexcept {
 }
 
 SignalStatus gmonopuls(ArrayRef<f64> t, f64 fc, MutArrayRef<f64> out) noexcept {
-    if (fc <= 0.0 || out.size() < t.size()) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(fc) || !(fc > 0.0) || out.size() < t.size()) {
+        return SignalStatus::kInvalidArgument;
+    }
     const f64 sqrt_e = keel::sqrt(keel::exp(1.0));
     const f64 k = 2.0 * sqrt_e * kPi * fc;
     for (usize i = 0; i < t.size(); ++i) {
@@ -138,13 +146,17 @@ SignalStatus gmonopuls(ArrayRef<f64> t, f64 fc, MutArrayRef<f64> out) noexcept {
 
 SignalStatus diric(ArrayRef<f64> x, i32 n, MutArrayRef<f64> out) noexcept {
     if (n < 1 || out.size() < x.size()) return SignalStatus::kInvalidArgument;
+    const bool odd_nm1 = ((n - 1) & 1) != 0;
     for (usize i = 0; i < x.size(); ++i) {
         const f64 xv = x[i];
         const f64 s = keel::sin(xv * 0.5);
         if (keel::abs(s) < 1e-12) {
-            const i64 k = keel::round_i64(xv / kTau);
-            const i64 sign = ((k * as<i64>(n - 1)) & 1) ? -1 : 1;
-            out[i] = as<f64>(sign);
+            if (!odd_nm1) {
+                out[i] = 1.0;
+            } else {
+                const f64 k_mod2 = keel::abs(keel::fmod(keel::round(xv / kTau), 2.0));
+                out[i] = (k_mod2 > 0.5) ? -1.0 : 1.0;
+            }
         } else {
             out[i] = keel::sin(as<f64>(n) * xv * 0.5) / (as<f64>(n) * s);
         }
@@ -154,7 +166,10 @@ SignalStatus diric(ArrayRef<f64> x, i32 n, MutArrayRef<f64> out) noexcept {
 
 SignalStatus chirp(ArrayRef<f64> t, f64 f0, f64 t1, f64 f1, ChirpMethod method, f64 phi_deg,
                    ChirpQuadShape quad_shape, MutArrayRef<f64> out) noexcept {
-    if (t1 <= 0.0 || out.size() < t.size()) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(t1) || !(t1 > 0.0) || !keel::is_finite(f0) || !keel::is_finite(f1) ||
+        !keel::is_finite(phi_deg) || out.size() < t.size()) {
+        return SignalStatus::kInvalidArgument;
+    }
     const usize n = t.size();
     const f64 phi_rad = phi_deg * (kPi / 180.0);
 
@@ -173,12 +188,18 @@ SignalStatus chirp(ArrayRef<f64> t, f64 f0, f64 t1, f64 f1, ChirpMethod method, 
         const bool reverse_vertex = (f1 > f0 && want_convex) || (f1 < f0 && want_concave);
         const f64 k = (f1 - f0) / (t1 * t1);
         if (reverse_vertex && n > 0) {
-            const f64 t_end = t[n - 1];
-            for (usize i = 0; i < n; ++i) {
-                const f64 t_flip = t[n - 1 - i];
-                const f64 phase =
-                    kTau * (f1 * (t_end - t_flip) + (k / 3.0) * t_flip * t_flip * t_flip) + phi_rad;
-                out[i] = keel::cos(phase);
+            // Pairwise from ends so t.data() == out.data() is 100% in-place safe.
+            const usize half = (n + 1) / 2;
+            for (usize i = 0; i < half; ++i) {
+                const usize j = n - 1 - i;
+                const f64 ti = t[i];
+                const f64 tj = t[j];
+                const f64 phase_i =
+                    kTau * (f1 * tj - (k / 3.0) * tj * tj * tj) + phi_rad;
+                const f64 phase_j =
+                    kTau * (f1 * ti - (k / 3.0) * ti * ti * ti) + phi_rad;
+                out[i] = keel::cos(phase_i);
+                out[j] = keel::cos(phase_j);
             }
         } else {
             for (usize i = 0; i < n; ++i) {
@@ -191,7 +212,7 @@ SignalStatus chirp(ArrayRef<f64> t, f64 f0, f64 t1, f64 f1, ChirpMethod method, 
     }
 
     // Logarithmic
-    if (f0 <= 0.0 || f1 <= 0.0 || f0 == f1) return SignalStatus::kInvalidArgument;
+    if (!(f0 > 0.0) || !(f1 > 0.0) || f0 == f1) return SignalStatus::kInvalidArgument;
     const f64 beta = keel::pow(f1 / f0, 1.0 / t1);
     const f64 log_beta = keel::log(beta);
     for (usize i = 0; i < n; ++i) {
@@ -204,11 +225,13 @@ SignalStatus chirp(ArrayRef<f64> t, f64 f0, f64 t1, f64 f1, ChirpMethod method, 
 SignalStatus modulate(ArrayRef<f64> x_col_major, usize len, usize cols, f64 fc, f64 fs,
                       ModulationMethod method, bool has_opt, f64 opt,
                       MutArrayRef<f64> out_col_major, Allocator* alloc) {
-    if (fs <= 0.0) return SignalStatus::kInvalidArgument;
-    const usize total = len * cols;
-    if (x_col_major.size() < total || out_col_major.size() < total) {
+    if (!keel::is_finite(fs) || !(fs > 0.0) || !keel::is_finite(fc)) {
         return SignalStatus::kInvalidArgument;
     }
+    if (cols > 0 && (x_col_major.size() / cols < len || out_col_major.size() / cols < len)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize total = len * cols;
     if (total == 0) return SignalStatus::kOk;
 
     if (method == ModulationMethod::kAm) {
@@ -299,19 +322,21 @@ SignalStatus modulate(ArrayRef<f64> x_col_major, usize len, usize cols, f64 fc, 
 SignalStatus demod(ArrayRef<f64> y_col_major, usize len, usize cols, f64 fc, f64 fs,
                    ModulationMethod method, bool has_opt, f64 opt, MutArrayRef<f64> out_col_major,
                    Allocator* alloc) {
-    if (fs <= 0.0 || method == ModulationMethod::kAmssb) {
+    if (!keel::is_finite(fs) || !(fs > 0.0) || !keel::is_finite(fc) ||
+        method == ModulationMethod::kAmssb) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (cols > 0 && (y_col_major.size() / cols < len || out_col_major.size() / cols < len)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize total = len * cols;
-    if (y_col_major.size() < total || out_col_major.size() < total) {
-        return SignalStatus::kInvalidArgument;
-    }
     if (total == 0) return SignalStatus::kOk;
 
     ArenaTemp scratch = keel::get_scratch(alloc);
 
     if (method == ModulationMethod::kFm || method == ModulationMethod::kPm) {
         const f64 p1 = has_opt ? opt : 1.0;
+        if (!keel::is_finite(p1) || p1 == 0.0) return SignalStatus::kInvalidArgument;
         Array<c64> h(len, c64(0.0, 0.0), scratch.allocator());
         Array<f64> ang(len, 0.0, scratch.allocator());
         for (usize c = 0; c < cols; ++c) {
@@ -324,10 +349,7 @@ SignalStatus demod(ArrayRef<f64> y_col_major, usize len, usize cols, f64 fc, f64
                 ang[r] = keel::arg(yq);
             }
             if (method == ModulationMethod::kFm) {
-                for (usize r = 1; r < len; ++r) {
-                    while (ang[r] - ang[r - 1] > kPi) ang[r] -= kTau;
-                    while (ang[r] - ang[r - 1] < -kPi) ang[r] += kTau;
-                }
+                (void)unwrap_phase(ang.as_ref(), ang.as_mut_ref(), kTau);
                 out_col_major[c * len + 0] = 0.0;
                 for (usize r = 1; r < len; ++r) {
                     out_col_major[c * len + r] = (1.0 / p1) * (ang[r] - ang[r - 1]);
@@ -377,13 +399,15 @@ SignalStatus demod(ArrayRef<f64> y_col_major, usize len, usize cols, f64 fc, f64
 
 SignalStatus vco(ArrayRef<f64> x_col_major, usize len, usize cols, f64 fc, f64 range1, f64 fs,
                  MutArrayRef<f64> out_col_major) noexcept {
-    if (fs <= 0.0) return SignalStatus::kInvalidArgument;
-    const usize total = len * cols;
-    if (x_col_major.size() < total || out_col_major.size() < total) {
+    if (!keel::is_finite(fs) || !(fs > 0.0) || !keel::is_finite(fc) || !keel::is_finite(range1)) {
         return SignalStatus::kInvalidArgument;
     }
+    if (cols > 0 && (x_col_major.size() / cols < len || out_col_major.size() / cols < len)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize total = len * cols;
     for (usize i = 0; i < total; ++i) {
-        if (x_col_major[i] > 1.0 || x_col_major[i] < -1.0) {
+        if (!(x_col_major[i] >= -1.0 && x_col_major[i] <= 1.0)) {
             return SignalStatus::kInvalidArgument;
         }
     }

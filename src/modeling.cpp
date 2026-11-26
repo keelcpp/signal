@@ -33,7 +33,7 @@ void levinson_core(ArrayRef<f64> r, i32 p, LevinsonResult& res, Allocator* alloc
         return;
     }
     f64 e = r[0];
-    if (e <= 0.0) {
+    if (!keel::is_finite(e) || e <= 0.0) {
         res.e = 0.0;
         return;
     }
@@ -158,8 +158,8 @@ void solve_ar_cov(ArrayRef<f64> r, i32 p, Array<f64>& a_out, f64& e_out, Allocat
     e_out = e;
 }
 
-SignalStatus invfreq_lsq(ArrayRef<c64> h, ArrayRef<c64> x, i32 nb, i32 na, TfResult& out,
-                         Allocator* alloc) {
+SignalStatus invfreq_lsq(ArrayRef<c64> h, ArrayRef<c64> x, i32 nb, i32 na, bool descending,
+                         TfResult& out, Allocator* alloc) {
     if (nb < 0 || na < 0 || h.size() != x.size()) {
         return SignalStatus::kInvalidArgument;
     }
@@ -185,15 +185,22 @@ SignalStatus invfreq_lsq(ArrayRef<c64> h, ArrayRef<c64> x, i32 nb, i32 na, TfRes
         for (i32 i = 1; i <= m_deg; ++i) {
             xpow[as<usize>(i)] = xpow[as<usize>(i - 1)] * x[uk];
         }
-        for (i32 i = 0; i <= nb; ++i) row[as<usize>(i)] = -xpow[as<usize>(i)];
-        for (i32 j = 1; j <= na; ++j) row[as<usize>(nb + j)] = h[uk] * xpow[as<usize>(j)];
+        c64 rhs_c = -h[uk];
+        if (descending) {
+            for (i32 i = 0; i <= nb; ++i) row[as<usize>(i)] = -xpow[as<usize>(nb - i)];
+            for (i32 j = 1; j <= na; ++j) row[as<usize>(nb + j)] = h[uk] * xpow[as<usize>(na - j)];
+            rhs_c = -h[uk] * xpow[as<usize>(na)];
+        } else {
+            for (i32 i = 0; i <= nb; ++i) row[as<usize>(i)] = -xpow[as<usize>(i)];
+            for (i32 j = 1; j <= na; ++j) row[as<usize>(nb + j)] = h[uk] * xpow[as<usize>(j)];
+        }
 
         for (i32 c = 0; c < nv; ++c) {
             ar[(2 * uk) * unv + as<usize>(c)] = row[as<usize>(c)].real();
             ar[(2 * uk + 1) * unv + as<usize>(c)] = row[as<usize>(c)].imag();
         }
-        rhs[2 * uk] = -h[uk].real();
-        rhs[2 * uk + 1] = -h[uk].imag();
+        rhs[2 * uk] = rhs_c.real();
+        rhs[2 * uk + 1] = rhs_c.imag();
     }
 
     Array<f64> ata(unv * unv, 0.0, scratch.allocator());
@@ -271,6 +278,9 @@ void jacobi_eig_sym(Array<f64>& a, Array<f64>& v, usize d) noexcept {
 SignalStatus pseudospectrum_impl(ArrayRef<f64> x, i32 p, i32 nfft, f64 fs, bool eig_weight,
                                  MutArrayRef<f64> p_out, MutArrayRef<f64> f_out,
                                  Allocator* alloc) {
+    if (x.empty() || !keel::is_finite(fs) || !(fs > 0.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
     if (p < 1) p = 1;
     if (nfft < 2) nfft = 256;
     const usize nf = as<usize>(nfft / 2 + 1);
@@ -307,9 +317,9 @@ SignalStatus pseudospectrum_impl(ArrayRef<f64> x, i32 p, i32 nfft, f64 fs, bool 
     keel::sort(ord, [&lam](usize a, usize b) noexcept { return lam[a] < lam[b]; });
     const usize n_noise = um - as<usize>(p);
 
-    const f64 denom_nf = as<f64>(nf - 1);
+    const f64 inv_nfft = 1.0 / as<f64>(nfft);
     for (usize k = 0; k < nf; ++k) {
-        const f64 w = kPi * as<f64>(k) / denom_nf;
+        const f64 w = kTau * as<f64>(k) * inv_nfft;
         f64 sum = 0.0;
         for (usize t = 0; t < n_noise; ++t) {
             const usize col = ord[t];
@@ -329,7 +339,7 @@ SignalStatus pseudospectrum_impl(ArrayRef<f64> x, i32 p, i32 nfft, f64 fs, bool 
         }
         p_out[k] = (sum > 0.0) ? (1.0 / sum) : Limits<f64>::infinity();
         if (!f_out.empty()) {
-            f_out[k] = (fs * 0.5) * as<f64>(k) / denom_nf;
+            f_out[k] = fs * as<f64>(k) * inv_nfft;
         }
     }
     return SignalStatus::kOk;
@@ -354,6 +364,7 @@ SignalStatus levinson(ArrayRef<f64> r, i32 order, LevinsonResult& out, Allocator
 
 SignalStatus rlevinson(ArrayRef<f64> a, f64 efinal, RlevinsonResult& out, Allocator* alloc) {
     if (a.empty()) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(a[0]) || a[0] == 0.0) return SignalStatus::kZeroLeadingCoeff;
     const i32 p = as<i32>(a.size()) - 1;
     out.r = Array<f64>(as<usize>(p + 1), 0.0, alloc);
     out.k = Array<f64>(as<usize>(p), 0.0, alloc);
@@ -363,7 +374,9 @@ SignalStatus rlevinson(ArrayRef<f64> a, f64 efinal, RlevinsonResult& out, Alloca
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
-    Array<f64> cur(a, scratch.allocator());
+    Array<f64> cur(a.size(), 0.0, scratch.allocator());
+    const f64 inv_a0 = 1.0 / a[0];
+    for (usize i = 0; i < a.size(); ++i) cur[i] = a[i] * inv_a0;
     f64 e = efinal;
     for (i32 i = p; i >= 1; --i) {
         const f64 ki = cur[as<usize>(i)];
@@ -515,10 +528,13 @@ SignalStatus rc2ac(ArrayRef<f64> k, f64 r0, Array<f64>& r_out, Allocator* alloc)
 SignalStatus poly2rc(ArrayRef<f64> a, f64 efinal, Array<f64>& k_out, f64& r0_out,
                      Allocator* alloc) {
     if (a.empty()) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(a[0]) || a[0] == 0.0) return SignalStatus::kZeroLeadingCoeff;
     const i32 p = as<i32>(a.size()) - 1;
     k_out = Array<f64>(as<usize>(p), 0.0, alloc);
     ArenaTemp scratch = keel::get_scratch(alloc);
-    Array<f64> cur(a, scratch.allocator());
+    Array<f64> cur(a.size(), 0.0, scratch.allocator());
+    const f64 inv_a0 = 1.0 / a[0];
+    for (usize i = 0; i < a.size(); ++i) cur[i] = a[i] * inv_a0;
     for (i32 i = p; i >= 1; --i) {
         const f64 ki = cur[as<usize>(i)];
         k_out[as<usize>(i - 1)] = ki;
@@ -569,6 +585,10 @@ SignalStatus rc2is(ArrayRef<f64> k, MutArrayRef<f64> is_out) noexcept {
     if (is_out.size() < k.size()) return SignalStatus::kInvalidArgument;
     constexpr f64 kTwoOverPi = 2.0 / kPi;
     for (usize i = 0; i < k.size(); ++i) {
+        if (keel::is_nan(k[i])) {
+            is_out[i] = Limits<f64>::quiet_nan();
+            continue;
+        }
         const f64 c = keel::max(-1.0, keel::min(1.0, k[i]));
         is_out[i] = kTwoOverPi * keel::asin(c);
     }
@@ -578,8 +598,7 @@ SignalStatus rc2is(ArrayRef<f64> k, MutArrayRef<f64> is_out) noexcept {
 SignalStatus lar2rc(ArrayRef<f64> g, MutArrayRef<f64> k_out) noexcept {
     if (k_out.size() < g.size()) return SignalStatus::kInvalidArgument;
     for (usize i = 0; i < g.size(); ++i) {
-        const f64 e = keel::exp(g[i]);
-        k_out[i] = (e - 1.0) / (e + 1.0);
+        k_out[i] = keel::tanh(0.5 * g[i]);
     }
     return SignalStatus::kOk;
 }
@@ -587,8 +606,16 @@ SignalStatus lar2rc(ArrayRef<f64> g, MutArrayRef<f64> k_out) noexcept {
 SignalStatus rc2lar(ArrayRef<f64> k, MutArrayRef<f64> g_out) noexcept {
     if (g_out.size() < k.size()) return SignalStatus::kInvalidArgument;
     for (usize i = 0; i < k.size(); ++i) {
-        const f64 c = keel::max(-0.99999999, keel::min(0.99999999, k[i]));
-        g_out[i] = keel::log((1.0 + c) / (1.0 - c));
+        const f64 ki = k[i];
+        if (keel::is_nan(ki)) {
+            g_out[i] = Limits<f64>::quiet_nan();
+        } else if (ki >= 1.0) {
+            g_out[i] = Limits<f64>::infinity();
+        } else if (ki <= -1.0) {
+            g_out[i] = -Limits<f64>::infinity();
+        } else {
+            g_out[i] = keel::log((1.0 + ki) / (1.0 - ki));
+        }
     }
     return SignalStatus::kOk;
 }
@@ -746,9 +773,9 @@ SignalStatus stmcb(ArrayRef<f64> y, ArrayRef<f64> x_opt, i32 nb, i32 na, i32 nit
 SignalStatus corrmtx(ArrayRef<f64> x, i32 m, MutArrayRef<f64> out_col_major) noexcept {
     if (m < 0) return SignalStatus::kInvalidArgument;
     const i32 n = as<i32>(x.size());
-    const usize rows = as<usize>(n + m);
-    const usize cols = as<usize>(m + 1);
-    if (out_col_major.size() < rows * cols) return SignalStatus::kInvalidArgument;
+    const usize rows = as<usize>(n) + as<usize>(m);
+    const usize cols = as<usize>(m) + 1;
+    if (out_col_major.size() / cols < rows) return SignalStatus::kInvalidArgument;
     for (usize k = 0; k < rows * cols; ++k) out_col_major[k] = 0.0;
     for (usize j = 0; j < cols; ++j) {
         for (usize i = 0; i < rows; ++i) {
@@ -837,7 +864,7 @@ SignalStatus invfreqs(ArrayRef<c64> h, ArrayRef<f64> w, i32 nb, i32 na, TfResult
     ArenaTemp scratch = keel::get_scratch(alloc);
     Array<c64> x(w.size(), c64(0.0, 0.0), scratch.allocator());
     for (usize k = 0; k < w.size(); ++k) x[k] = c64(0.0, w[k]);
-    return invfreq_lsq(h, x.as_ref(), nb, na, out, alloc);
+    return invfreq_lsq(h, x.as_ref(), nb, na, /*descending=*/true, out, alloc);
 }
 
 SignalStatus invfreqz(ArrayRef<c64> h, ArrayRef<f64> w, i32 nb, i32 na, TfResult& out,
@@ -846,7 +873,7 @@ SignalStatus invfreqz(ArrayRef<c64> h, ArrayRef<f64> w, i32 nb, i32 na, TfResult
     ArenaTemp scratch = keel::get_scratch(alloc);
     Array<c64> x(w.size(), c64(0.0, 0.0), scratch.allocator());
     for (usize k = 0; k < w.size(); ++k) x[k] = c64(keel::cos(-w[k]), keel::sin(-w[k]));
-    return invfreq_lsq(h, x.as_ref(), nb, na, out, alloc);
+    return invfreq_lsq(h, x.as_ref(), nb, na, /*descending=*/false, out, alloc);
 }
 
 SignalStatus pmusic(ArrayRef<f64> x, i32 p, i32 nfft, f64 fs, MutArrayRef<f64> p_out,

@@ -35,6 +35,7 @@ f64 integrate_trapz_band(ArrayRef<f64> p, ArrayRef<f64> f, f64 f_lo, f64 f_hi) n
         f64 b = f[i + 1];
         if (b <= f_lo) continue;
         if (a >= f_hi) break;
+        if (!(b > a)) continue;
         f64 pa = p[i];
         f64 pb = p[i + 1];
         if (a < f_lo) {
@@ -100,7 +101,7 @@ PsdMoments compute_psd_moments(ArrayRef<f64> p, ArrayRef<f64> f) noexcept {
 
 constexpr usize next_pow2_min256(usize n) noexcept {
     usize p = 256;
-    while (p < n) p <<= 1;
+    while (p < n && p <= (Limits<usize>::kMax >> 1)) p <<= 1;
     return p;
 }
 
@@ -301,14 +302,17 @@ template <typename T>
 SignalStatus pspectrum_impl(ArrayRef<T> x_col_major, usize n_samples, usize n_channels,
                             bool is_complex, const PspectrumOptions& opts, PspectrumResult& out,
                             Allocator* alloc) {
-    if (n_samples < 2 || n_channels == 0 || x_col_major.size() < n_samples * n_channels) {
+    if (n_samples < 2 || n_channels == 0 || x_col_major.size() / n_channels < n_samples) {
         return SignalStatus::kInvalidArgument;
     }
     if (!keel::is_finite(opts.leakage) || opts.leakage < 0.0 || opts.leakage > 1.0) {
         return SignalStatus::kInvalidArgument;
     }
-    if (opts.overlap_percent >= 100.0 ||
+    if (!keel::is_finite(opts.overlap_percent) || opts.overlap_percent >= 100.0 ||
         (opts.overlap_percent < 0.0 && opts.overlap_percent != -1.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (!keel::is_finite(opts.time_resolution) && opts.time_resolution != 0.0) {
         return SignalStatus::kInvalidArgument;
     }
     if (!keel::is_finite(opts.fs) || opts.fs <= 0.0) {
@@ -546,7 +550,8 @@ SignalStatus medfreq_time(ArrayRef<f64> x, f64 fs, f64& out_freq, Allocator* all
     const f64 half = 0.5 * total;
     for (usize i = 1; i < n; ++i) {
         if (cum[i] >= half) {
-            const f64 t = (half - cum[i - 1]) / (cum[i] - cum[i - 1]);
+            const f64 diff = cum[i] - cum[i - 1];
+            const f64 t = (diff > 0.0) ? ((half - cum[i - 1]) / diff) : 0.0;
             out_freq = p.f[i - 1] + t * (p.f[i] - p.f[i - 1]);
             return SignalStatus::kOk;
         }
@@ -575,6 +580,9 @@ SignalStatus enbw(ArrayRef<f64> window, f64 fs, f64& out_bw) noexcept {
 
 SignalStatus obw_time(ArrayRef<f64> x, f64 fs, f64 pct, ObwResult& out, Allocator* alloc) {
     out = {};
+    if (!keel::is_finite(pct) || !(pct > 0.0 && pct < 1.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
     const usize n = x.size();
     if (n < 2) return SignalStatus::kOk;
 
@@ -898,9 +906,12 @@ SignalStatus pspectrum_c64(ArrayRef<c64> x_col_major, usize n_samples, usize n_c
 
 SignalStatus instfreq_hilbert(ArrayRef<f64> x, f64 fs, f64 t0, MutArrayRef<f64> f_out,
                               MutArrayRef<f64> t_out, Allocator* alloc) {
+    if (!keel::is_finite(fs) || !(fs > 0.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
     const usize n = x.size();
     if (n < 2) return SignalStatus::kOk;
-    if (f_out.size() < n - 1 || (!t_out.empty() && t_out.size() < n - 1) || fs <= 0.0) {
+    if (f_out.size() < n - 1 || (!t_out.empty() && t_out.size() < n - 1)) {
         return SignalStatus::kInvalidArgument;
     }
     ArenaTemp scratch = keel::get_scratch(alloc);
@@ -912,8 +923,9 @@ SignalStatus instfreq_hilbert(ArrayRef<f64> x, f64 fs, f64 t0, MutArrayRef<f64> 
         const f64 p1 = keel::atan2(z[i + 1].imag(), z[i + 1].real());
         const f64 p0 = keel::atan2(z[i].imag(), z[i].real());
         f64 dp = p1 - p0;
-        while (dp > kPi) dp -= kTau;
-        while (dp <= -kPi) dp += kTau;
+        if (keel::is_finite(dp)) {
+            dp -= kTau * keel::round(dp / kTau);
+        }
         f_out[i] = dp * fs / kTau;
         if (!t_out.empty()) {
             t_out[i] = t0 + (as<f64>(i) + 0.5) / fs;
@@ -924,7 +936,8 @@ SignalStatus instfreq_hilbert(ArrayRef<f64> x, f64 fs, f64 t0, MutArrayRef<f64> 
 
 SignalStatus instfreq_from_spec(ArrayRef<f64> p_col_major, usize n_freq, usize n_time,
                                 ArrayRef<f64> f, MutArrayRef<f64> out_if) noexcept {
-    if (f.size() < n_freq || p_col_major.size() < n_freq * n_time || out_if.size() < n_time) {
+    if (f.size() < n_freq || (n_time > 0 && p_col_major.size() / n_time < n_freq) ||
+        out_if.size() < n_time) {
         return SignalStatus::kInvalidArgument;
     }
     for (usize m = 0; m < n_time; ++m) {
@@ -942,7 +955,8 @@ SignalStatus instfreq_from_spec(ArrayRef<f64> p_col_major, usize n_freq, usize n
 
 SignalStatus instbw_from_spec(ArrayRef<f64> p_col_major, usize n_freq, usize n_time,
                               ArrayRef<f64> f, MutArrayRef<f64> out_ibw) noexcept {
-    if (f.size() < n_freq || p_col_major.size() < n_freq * n_time || out_ibw.size() < n_time) {
+    if (f.size() < n_freq || (n_time > 0 && p_col_major.size() / n_time < n_freq) ||
+        out_ibw.size() < n_time) {
         return SignalStatus::kInvalidArgument;
     }
     const f64 scale = 2.0 * keel::sqrt(kPi);
@@ -993,13 +1007,12 @@ SignalStatus envspectrum(ArrayRef<f64> x, f64 fs, Array<f64>& es_out, Array<f64>
 
     es_out = Array<f64>(n_one, 0.0, alloc);
     f_out = Array<f64>(n_one, 0.0, alloc);
-    const f64 f_nyq = (fs > 0.0) ? (fs * 0.5) : kPi;
+    const f64 df = ((fs > 0.0) ? fs : kTau) / as<f64>(n);
     const f64 scale = 2.0 / as<f64>(n);
-    const f64 denom = (n_one > 1) ? as<f64>(n_one - 1) : 1.0;
     for (usize i = 0; i < n_one; ++i) {
         const f64 a = keel::abs(z[i]) * scale;
-        es_out[i] = (i == 0 || i + 1 == n_one) ? (0.5 * a) : a;
-        f_out[i] = f_nyq * as<f64>(i) / denom;
+        es_out[i] = (i == 0 || 2 * i == n) ? (0.5 * a) : a;
+        f_out[i] = df * as<f64>(i);
     }
     return SignalStatus::kOk;
 }
@@ -1052,17 +1065,29 @@ SignalStatus rainflow(ArrayRef<f64> x, Array<RainflowCycle>& cycles_out, Allocat
         f64 idx = 0.0;
     };
     ArenaTemp scratch = keel::get_scratch(alloc);
-    Array<Turn> tp(scratch.allocator());
-    tp.push_back(Turn{x[0], 1.0});
-    for (usize i = 1; i + 1 < n; ++i) {
-        const f64 a = x[i - 1];
-        const f64 b = x[i];
-        const f64 c = x[i + 1];
-        if ((b > a && b > c) || (b < a && b < c)) {
-            tp.push_back(Turn{b, as<f64>(i + 1)});
+    // Compress consecutive equal samples (preserving first 1-based index of each plateau)
+    // so flat-top peaks/valleys are recognized as turning points per ASTM E1049-85 / MATLAB.
+    Array<Turn> uniq(scratch.allocator());
+    uniq.reserve(n);
+    uniq.push_back(Turn{x[0], 1.0});
+    for (usize i = 1; i < n; ++i) {
+        if (x[i] != uniq[uniq.size() - 1].v) {
+            uniq.push_back(Turn{x[i], as<f64>(i + 1)});
         }
     }
-    if (n > 1) {
+    Array<Turn> tp(scratch.allocator());
+    tp.push_back(uniq[0]);
+    for (usize i = 1; i + 1 < uniq.size(); ++i) {
+        const f64 a = uniq[i - 1].v;
+        const f64 b = uniq[i].v;
+        const f64 c = uniq[i + 1].v;
+        if ((b > a && b > c) || (b < a && b < c)) {
+            tp.push_back(uniq[i]);
+        }
+    }
+    if (uniq.size() > 1) {
+        tp.push_back(uniq[uniq.size() - 1]);
+    } else if (n > 1) {
         tp.push_back(Turn{x[n - 1], as<f64>(n)});
     } else {
         tp.push_back(Turn{x[0], 1.0});

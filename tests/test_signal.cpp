@@ -3,6 +3,7 @@
 #include "keel/array.h"
 #include "keel/format.h"
 #include "keel/math.h"
+#include "keel/string.h"
 
 namespace {
 
@@ -13,14 +14,14 @@ i32 g_failures = 0;
 
 void check_true(bool cond, const char* expr, i32 line) {
     if (!cond) {
-        keel::eprintln("FAIL line {}: {}", line, expr);
+        keel::eprintln("FAIL line %d: %s", line, expr);
         ++g_failures;
     }
 }
 
 void check_near(f64 actual, f64 expected, f64 tol, const char* expr, i32 line) {
     if (!(keel::abs(actual - expected) <= tol)) {
-        keel::eprintln("FAIL line {}: {} (actual={}, expected={}, tol={})",
+        keel::eprintln("FAIL line %d: %s (actual=%.15g, expected=%.15g, tol=%.15g)",
                        line, expr, actual, expected, tol);
         ++g_failures;
     }
@@ -1065,9 +1066,498 @@ void test_waveforms_and_pulse_roi() {
     CHECK(merged[0].start == 2 && merged[0].end == 8);
 }
 
+void test_hardening_regressions() {
+    const f64 nan = Limits<f64>::quiet_nan();
+    const f64 inf = Limits<f64>::infinity();
+
+    // 1. Kaiser large beta (no overflow) & NaN handling
+    {
+        f64 w[11]{};
+        sig::kaiser(w, 1000.0);
+        CHECK_NEAR(w[5], 1.0, 1e-14);
+        for (usize i = 0; i < 11; ++i) CHECK(keel::is_finite(w[i]) && w[i] >= 0.0 && w[i] <= 1.0);
+        CHECK(sig::gausswin(w, nan) == sig::SignalStatus::kInvalidArgument);
+        CHECK(sig::gausswin(w, inf) == sig::SignalStatus::kInvalidArgument);
+        CHECK(sig::chebwin(w, nan) == sig::SignalStatus::kInvalidArgument);
+        CHECK(sig::taylorwin(w, 4, nan) == sig::SignalStatus::kInvalidArgument);
+        f64 t_buf[32]{}, r_buf[2]{};
+        CHECK(sig::dpss(16, nan, t_buf, r_buf) == sig::SignalStatus::kInvalidArgument);
+        CHECK(sig::dpss(16, 8.0, t_buf, r_buf) == sig::SignalStatus::kInvalidArgument);
+    }
+
+    // 2. cconv modular folding when nx > n or ny > n
+    {
+        const f64 a[4] = {1.0, 2.0, 3.0, 4.0};
+        const f64 b[3] = {1.0, 1.0, 1.0};
+        f64 c2[2]{}, c3[3]{};
+        CHECK(sig::cconv(a, b, 2, c2) == sig::SignalStatus::kOk);
+        CHECK_NEAR(c2[0], 14.0, 1e-12);
+        CHECK_NEAR(c2[1], 16.0, 1e-12);
+        CHECK(sig::cconv(a, b, 3, c3) == sig::SignalStatus::kOk);
+        CHECK_NEAR(c3[0], 10.0, 1e-12);
+        CHECK_NEAR(c3[1], 10.0, 1e-12);
+        CHECK_NEAR(c3[2], 10.0, 1e-12);
+    }
+
+    // 3. unwrap_phase skips NaN without poisoning subsequent samples
+    {
+        const f64 p[5] = {0.0, 3.0, nan, -3.0, -2.0};
+        f64 out[5]{};
+        CHECK(sig::unwrap_phase(p, out) == sig::SignalStatus::kOk);
+        CHECK_NEAR(out[0], 0.0, 1e-14);
+        CHECK_NEAR(out[1], 3.0, 1e-14);
+        CHECK(keel::is_nan(out[2]));
+        CHECK_NEAR(out[3], -3.0 + kTau, 1e-12);
+        CHECK_NEAR(out[4], -2.0 + kTau, 1e-12);
+    }
+
+    // 4. medfilt1 with NaN matches MATLAB includenan (no heap corruption)
+    {
+        const f64 x[5] = {1.0, 2.0, nan, 4.0, 5.0};
+        f64 y[5]{};
+        CHECK(sig::medfilt1(x, 3, true, y) == sig::SignalStatus::kOk);
+        CHECK_NEAR(y[0], 1.0, 1e-14);
+        CHECK(keel::is_nan(y[1]));
+        CHECK(keel::is_nan(y[2]));
+        CHECK(keel::is_nan(y[3]));
+        CHECK_NEAR(y[4], 4.0, 1e-14);
+    }
+
+    // 5. Odd nfft periodogram/pwelch/pyulear frequency grid & one-sided doubling
+    {
+        const f64 x[5] = {1.0, 2.0, 3.0, 4.0, 5.0};
+        f64 pxx[3]{}, f[3]{};
+        CHECK(sig::periodogram(x, {}, 5, 10.0, pxx, f) == sig::SignalStatus::kOk);
+        CHECK_NEAR(f[0], 0.0, 1e-14);
+        CHECK_NEAR(f[1], 2.0, 1e-14);
+        CHECK_NEAR(f[2], 4.0, 1e-14);
+        CHECK_NEAR(pxx[0], 4.5, 1e-12);
+        CHECK_NEAR(pxx[1], 0.723606797749979, 1e-11);
+        CHECK_NEAR(pxx[2], 0.276393202250021, 1e-11);
+
+        // Zero-energy window rejected
+        const f64 zw[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+        CHECK(sig::periodogram(x, zw, 5, 10.0, pxx, f) == sig::SignalStatus::kInvalidArgument);
+    }
+
+    // 6. In-place fftfilt & upfirdn & chirp quadratic convex
+    {
+        const f64 b[3] = {0.25, 0.5, 0.25};
+        f64 x1[16]{}, x2[16]{}, ref[16]{};
+        for (usize i = 0; i < 16; ++i) {
+            x1[i] = keel::sin(0.3 * as<f64>(i));
+            x2[i] = x1[i];
+        }
+        CHECK(sig::fftfilt(b, x1, 0, ref) == sig::SignalStatus::kOk);
+        CHECK(sig::fftfilt(b, x2, 0, x2) == sig::SignalStatus::kOk);
+        for (usize i = 0; i < 16; ++i) CHECK_NEAR(x2[i], ref[i], 1e-12);
+
+        f64 dec_x[4] = {1.0, 2.0, 3.0, 4.0};
+        keel::Array<f64> dec_out;
+        CHECK(sig::decimate(dec_x, 0, dec_out) == sig::SignalStatus::kInvalidArgument);
+
+        // Chirp quad convex with t_end != t1 + in-place
+        const f64 tc[3] = {0.0, 0.2, 0.5};
+        f64 ch_ref[3]{}, ch_ip[3] = {0.0, 0.2, 0.5};
+        CHECK(sig::chirp(tc, 1.0, 1.0, 5.3, sig::ChirpMethod::kQuadratic, 0.0,
+                         sig::ChirpQuadShape::kConvex, ch_ref) == sig::SignalStatus::kOk);
+        CHECK(sig::chirp(ch_ip, 1.0, 1.0, 5.3, sig::ChirpMethod::kQuadratic, 0.0,
+                         sig::ChirpQuadShape::kConvex, ch_ip) == sig::SignalStatus::kOk);
+        CHECK_NEAR(ch_ref[0], -0.983254907563954, 1e-12);
+        CHECK_NEAR(ch_ref[1], 0.953863789434885, 1e-12);
+        CHECK_NEAR(ch_ref[2], 1.0, 1e-12);
+        for (usize i = 0; i < 3; ++i) CHECK_NEAR(ch_ip[i], ch_ref[i], 1e-14);
+    }
+
+    // 7. IIR: besselap(9), buttord bandpass/bandstop, invfreqs descending s, lar2rc large g
+    {
+        sig::ZpkResult b9;
+        CHECK(sig::besselap(9, b9) == sig::SignalStatus::kOk);
+        CHECK(b9.p.size() == 9);
+        CHECK_NEAR(b9.k, 1.0, 1e-14);
+        CHECK(sig::besselap(-1, b9) == sig::SignalStatus::kInvalidArgument);
+        CHECK(sig::besselap(26, b9) == sig::SignalStatus::kInvalidArgument);
+
+        const f64 wp_bp[2] = {0.2, 0.5}, ws_bp[2] = {0.1, 0.6};
+        sig::OrderResult ord;
+        CHECK(sig::buttord(wp_bp, ws_bp, 3.0, 40.0, false, ord) == sig::SignalStatus::kOk);
+        CHECK(ord.order == 9);
+        CHECK_NEAR(ord.wn[0], 0.198801418121658, 1e-10);
+        CHECK_NEAR(ord.wn[1], 0.502044442564962, 1e-10);
+
+        const f64 wp_bs[2] = {0.1, 0.6}, ws_bs[2] = {0.2, 0.5};
+        CHECK(sig::buttord(wp_bs, ws_bs, 1.0, 40.0, false, ord) == sig::SignalStatus::kOk);
+        CHECK(ord.order == 11);
+
+        // invfreqs recovers H(s) = (2s + 3) / (s^2 + 4s + 5)
+        const f64 w_s[7] = {0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0};
+        c64 h_s[7]{};
+        for (usize i = 0; i < 7; ++i) {
+            const c64 s(0.0, w_s[i]);
+            h_s[i] = (2.0 * s + 3.0) / (s * s + 4.0 * s + 5.0);
+        }
+        sig::TfResult tf_s;
+        CHECK(sig::invfreqs(h_s, w_s, 1, 2, tf_s) == sig::SignalStatus::kOk);
+        CHECK_NEAR(tf_s.b[0], 2.0, 1e-9);
+        CHECK_NEAR(tf_s.b[1], 3.0, 1e-9);
+        CHECK_NEAR(tf_s.a[0], 1.0, 1e-12);
+        CHECK_NEAR(tf_s.a[1], 4.0, 1e-9);
+        CHECK_NEAR(tf_s.a[2], 5.0, 1e-9);
+
+        // lar2rc large value (no exp overflow) & rc2lar precision near 1
+        const f64 g_big[2] = {1000.0, -1000.0};
+        f64 k_big[2]{};
+        CHECK(sig::lar2rc(g_big, k_big) == sig::SignalStatus::kOk);
+        CHECK_NEAR(k_big[0], 1.0, 1e-15);
+        CHECK_NEAR(k_big[1], -1.0, 1e-15);
+
+        const f64 k_near1[1] = {0.999999999};
+        f64 g_near1[1]{};
+        CHECK(sig::rc2lar(k_near1, g_near1) == sig::SignalStatus::kOk);
+        CHECK_NEAR(g_near1[0], 21.4164130452883, 1e-8);
+
+        // poly2rc with a[0] != 1
+        const f64 a_scaled[3] = {2.0, -1.5, 1.0};
+        keel::Array<f64> k_sc;
+        f64 r0_sc = 0.0;
+        CHECK(sig::poly2rc(a_scaled, 0.25, k_sc, r0_sc) == sig::SignalStatus::kOk);
+        CHECK_NEAR(k_sc[0], -0.5, 1e-12);
+        CHECK_NEAR(k_sc[1], 0.5, 1e-12);
+    }
+
+    // 8. rectpuls boundary, rainflow plateau, pulsewidth fs < 1, fir1_single odd HP reject
+    {
+        const f64 t_rp[3] = {-0.5, 0.0, 0.5};
+        f64 y_rp[3]{};
+        CHECK(sig::rectpuls(t_rp, 1.0, y_rp) == sig::SignalStatus::kOk);
+        CHECK_NEAR(y_rp[0], 1.0, 1e-15);
+        CHECK_NEAR(y_rp[1], 1.0, 1e-15);
+        CHECK_NEAR(y_rp[2], 0.0, 1e-15);
+
+        const f64 plat[4] = {0.0, 2.0, 2.0, 0.0};
+        keel::Array<sig::RainflowCycle> rf;
+        CHECK(sig::rainflow(plat, rf) == sig::SignalStatus::kOk);
+        CHECK(rf.size() == 2);
+        CHECK_NEAR(rf[0].range, 2.0, 1e-12);
+        CHECK_NEAR(rf[1].range, 2.0, 1e-12);
+
+        keel::Array<f64> pulse(100, 0.0);
+        for (usize i = 20; i < 60; ++i) pulse[i] = 5.0;
+        keel::Array<f64> pw_half;
+        CHECK(sig::pulsewidth(pulse.as_ref(), 0.5, pw_half) == sig::SignalStatus::kOk);
+        CHECK(pw_half.size() == 1);
+        CHECK_NEAR(pw_half[0], 80.0, 1.0); // 40 samples / 0.5 Hz = 80 s
+
+        f64 b_odd[6]{};
+        CHECK(sig::fir1_single(5, 0.4, true, b_odd) == sig::SignalStatus::kInvalidArgument);
+    }
+}
+
+void print_vec(const char* name, ArrayRef<f64> v) {
+    keel::print("%s=", name);
+    for (usize i = 0; i < v.size(); ++i) {
+        if (i > 0) keel::print(",");
+        if (keel::is_nan(v[i])) {
+            keel::print("nan");
+        } else if (!keel::is_finite(v[i])) {
+            keel::print(v[i] > 0.0 ? "inf" : "-inf");
+        } else {
+            keel::print("%.17g", v[i]);
+        }
+    }
+    keel::println("");
+}
+
+void print_cvec(const char* name, ArrayRef<c64> v) {
+    keel::print("%s=", name);
+    for (usize i = 0; i < v.size(); ++i) {
+        if (i > 0) keel::print(",");
+        keel::print("%.17g;%.17g", v[i].real(), v[i].imag());
+    }
+    keel::println("");
+}
+
+void dump_reference() {
+    // 1. Windows
+    {
+        f64 w16[16]{}, w15[15]{};
+        sig::hann(w16); print_vec("win_hann_16", w16);
+        sig::hamming(w15); print_vec("win_hamming_15", w15);
+        sig::blackman(w16); print_vec("win_blackman_16", w16);
+        sig::bartlett(w15); print_vec("win_bartlett_15", w15);
+        sig::triang(w16); print_vec("win_triang_16", w16);
+        sig::triang(w15); print_vec("win_triang_15", w15);
+        sig::kaiser(w16, 5.0); print_vec("win_kaiser_16_5", w16);
+        sig::kaiser(w15, 800.0); print_vec("win_kaiser_15_800", w15);
+        sig::tukeywin(w16, 0.5); print_vec("win_tukey_16", w16);
+        sig::flattopwin(w16); print_vec("win_flattop_16", w16);
+        (void)sig::gausswin(w15, 2.5); print_vec("win_gauss_15", w15);
+        (void)sig::chebwin(w15, 80.0); print_vec("win_cheb_15", w15);
+        sig::parzenwin(w16); print_vec("win_parzen_16", w16);
+        sig::nuttallwin(w16); print_vec("win_nuttall_16", w16);
+        sig::blackmanharris(w16); print_vec("win_bh_16", w16);
+        sig::bohmanwin(w15); print_vec("win_bohman_15", w15);
+        sig::barthannwin(w15); print_vec("win_barthann_15", w15);
+        (void)sig::taylorwin(w15, 4, -30.0); print_vec("win_taylor_15", w15);
+        f64 tapers[32 * 3]{}, ratios[3]{};
+        (void)sig::dpss(32, 3.0, tapers, ratios);
+        print_vec("win_dpss_ratios", ratios);
+        print_vec("win_dpss_col0", ArrayRef<f64>(tapers, 32));
+    }
+
+    // 2. Conv / cconv / deconv / xcorr / xcov / xcorr2
+    {
+        const f64 a[4] = {1.0, 2.0, 3.0, 4.0};
+        const f64 b[3] = {1.0, -0.5, 2.0};
+        f64 c1[6]{};
+        (void)sig::conv_1d(a, b, c1); print_vec("conv_1d", c1);
+        f64 cc2[2]{}, cc3[3]{}, cc5[5]{};
+        (void)sig::cconv(a, b, 2, cc2); print_vec("cconv_2", cc2);
+        (void)sig::cconv(a, b, 3, cc3); print_vec("cconv_3", cc3);
+        (void)sig::cconv(a, b, 5, cc5); print_vec("cconv_5", cc5);
+        Array<f64> dq, dr;
+        (void)sig::deconv(c1, b, dq, dr);
+        print_vec("deconv_q", dq.as_ref());
+        print_vec("deconv_r", dr.as_ref());
+        f64 xc[7]{}, xlags[7]{};
+        (void)sig::xcorr(a, b, xc, xlags);
+        print_vec("xcorr", xc);
+        Array<f64> xcv, xcv_l;
+        (void)sig::xcov(a, a, 3, sig::XcorrScale::kCoeff, xcv, xcv_l);
+        print_vec("xcov_coeff", xcv.as_ref());
+        const f64 ma[6] = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}; // 2x3 col-major
+        const f64 mb[4] = {1.0, -1.0, 2.0, 0.5};          // 2x2 col-major
+        f64 mc2[12]{};
+        (void)sig::conv_2d(ma, 2, 3, mb, 2, 2, mc2);
+        print_vec("conv_2d", mc2);
+        f64 mx2[12]{};
+        (void)sig::xcorr2(ma, 2, 3, mb, 2, 2, mx2);
+        print_vec("xcorr2", mx2);
+    }
+
+    // 3. Filtering & analysis
+    {
+        const f64 b[3] = {0.2, 0.4, 0.2};
+        const f64 a[3] = {1.0, -0.5, 0.25};
+        f64 x[32]{};
+        for (usize i = 0; i < 32; ++i) x[i] = keel::sin(0.25 * as<f64>(i)) + 0.3 * keel::cos(1.1 * as<f64>(i));
+        f64 y[32]{}, zf[2]{};
+        (void)sig::filter_df2t(b, a, x, y, {}, zf);
+        print_vec("filter_df2t", y);
+        print_vec("filter_df2t_zf", zf);
+        f64 yff[32]{};
+        (void)sig::filtfilt(b, a, x, yff);
+        print_vec("filtfilt", yff);
+        c64 hz[16]{}; f64 wz[16]{};
+        (void)sig::freqz_grid(b, a, 16, false, 0.0, hz, wz);
+        print_cvec("freqz_h", hz);
+        f64 gd[16]{};
+        (void)sig::grpdelay(b, a, 16, 0.0, gd, wz);
+        print_vec("grpdelay", gd);
+        f64 imp[16]{}, stp[16]{};
+        (void)sig::impz(b, a, 16, imp);
+        (void)sig::stepz(b, a, 16, stp);
+        print_vec("impz", imp);
+        print_vec("stepz", stp);
+        const f64 ps[4] = {1.0, -2.5, 2.0, -0.5};
+        Array<f64> pst;
+        (void)sig::polystab(ps, pst);
+        print_vec("polystab", pst.as_ref());
+    }
+
+    // 4. Transforms
+    {
+        f64 x16[16]{}, y16[16]{};
+        for (usize i = 0; i < 16; ++i) x16[i] = keel::sin(0.31 * as<f64>(i)) + 0.4 * keel::cos(0.9 * as<f64>(i));
+        (void)sig::dct(x16, y16, 1); print_vec("dct1_16", y16);
+        (void)sig::dct(x16, y16, 2); print_vec("dct2_16", y16);
+        (void)sig::dct(x16, y16, 3); print_vec("dct3_16", y16);
+        (void)sig::dct(x16, y16, 4); print_vec("dct4_16", y16);
+        f64 fw[8]{};
+        const f64 fwin[8] = {1.0, 2.0, -1.0, 4.0, 0.5, -2.5, 3.0, 1.5};
+        (void)sig::fwht(fwin, fw, sig::FwhtOrdering::kSequency); print_vec("fwht_seq", fw);
+        (void)sig::fwht(fwin, fw, sig::FwhtOrdering::kHadamard); print_vec("fwht_had", fw);
+        (void)sig::fwht(fwin, fw, sig::FwhtOrdering::kDyadic); print_vec("fwht_dya", fw);
+        c64 hilb15[15]{};
+        (void)sig::hilbert(ArrayRef<f64>(x16, 15), hilb15);
+        print_cvec("hilbert_15", hilb15);
+        const f64 unin[6] = {0.0, 3.0, Limits<f64>::quiet_nan(), -3.0, -2.0, 3.5};
+        f64 unout[6]{};
+        (void)sig::unwrap_phase(unin, unout);
+        print_vec("unwrap_nan", unout);
+        const f64 seq[5] = {1.0, 0.5, 0.25, 0.1, 0.0};
+        f64 cce[5]{}, rce[5]{}, rmp[5]{};
+        (void)sig::cceps(seq, cce); print_vec("cceps_5", cce);
+        (void)sig::rceps_minphase(seq, rce, rmp); print_vec("rceps_5", rce); print_vec("rceps_mp_5", rmp);
+        c64 cz_in[6]{}, cz_out[5]{};
+        for (usize i = 0; i < 6; ++i) cz_in[i] = c64(as<f64>(i + 1), -0.5 * as<f64>(i));
+        (void)sig::czt(cz_in, 5, keel::polar(0.95, -0.4), keel::polar(1.05, 0.2), cz_out);
+        print_cvec("czt_5", cz_out);
+    }
+
+    // 5. Smoothing & Peaks
+    {
+        const f64 mx[7] = {1.0, 5.0, 2.0, 8.0, 3.0, 1.0, 4.0};
+        f64 my[7]{};
+        (void)sig::medfilt1(mx, 3, true, my); print_vec("medfilt1_zp", my);
+        f64 sg_b[25]{};
+        (void)sig::sgolay(2, 5, sg_b, {}); print_vec("sgolay_2_5", sg_b);
+        f64 sgy[7]{};
+        (void)sig::sgolayfilt(mx, 2, 5, sgy); print_vec("sgolayfilt", sgy);
+        const f64 px[11] = {0.0, 1.0, 5.0, 2.0, 3.0, 1.0, 0.0, 2.0, 8.0, 1.0, 0.0};
+        sig::PeakResult pr;
+        (void)sig::findpeaks(px, {}, sig::PeakOptions{}, pr);
+        print_vec("findpeaks_val", pr.values.as_ref());
+        print_vec("findpeaks_loc", pr.locations.as_ref());
+        print_vec("findpeaks_prom", pr.prominences.as_ref());
+    }
+
+    // 6. Spectral (even & odd nfft)
+    {
+        f64 x64[64]{};
+        for (usize i = 0; i < 64; ++i) x64[i] = keel::cos(kTau * 0.125 * as<f64>(i)) + 0.3 * keel::sin(kTau * 0.3 * as<f64>(i));
+        f64 p16[9]{}, f16[9]{}, p15[8]{}, f15[8]{};
+        (void)sig::periodogram(x64, {}, 64, 100.0, p16, f16);
+        f64 p64[33]{}, f64_out[33]{};
+        (void)sig::periodogram(x64, {}, 64, 100.0, p64, f64_out);
+        print_vec("per_64_p", p64); print_vec("per_64_f", f64_out);
+        const f64 x5[5] = {1.0, 2.0, 3.0, 4.0, 5.0};
+        f64 p5[3]{}, f5[3]{};
+        (void)sig::periodogram(x5, {}, 5, 10.0, p5, f5);
+        print_vec("per_5_p", p5); print_vec("per_5_f", f5);
+        f64 wh[16]{}; sig::hamming(wh);
+        f64 pw_p[9]{}, pw_f[9]{};
+        (void)sig::pwelch(x64, wh, 8, 16, 100.0, pw_p, pw_f);
+        print_vec("pwelch_p", pw_p); print_vec("pwelch_f", pw_f);
+        (void)sig::pyulear(x64, 4, 15, p15, f15);
+        print_vec("pyulear_15_p", p15); print_vec("pyulear_15_f", f15);
+        (void)sig::pburg(x64, 4, 16, p16, f16);
+        print_vec("pburg_16_p", p16); print_vec("pburg_16_f", f16);
+    }
+
+    // 7. IIR & Orders
+    {
+        sig::TfResult tf;
+        const f64 wlp[1] = {0.35};
+        const f64 wbp[2] = {0.2, 0.5};
+        (void)sig::butter(4, wlp, sig::FilterType::kLowpass, false, tf);
+        print_vec("butter_lp4_b", tf.b.as_ref()); print_vec("butter_lp4_a", tf.a.as_ref());
+        (void)sig::butter(2, wbp, sig::FilterType::kBandpass, false, tf);
+        print_vec("butter_bp2_b", tf.b.as_ref()); print_vec("butter_bp2_a", tf.a.as_ref());
+        (void)sig::cheby1(3, 1.0, wlp, sig::FilterType::kHighpass, false, tf);
+        print_vec("cheby1_hp3_b", tf.b.as_ref()); print_vec("cheby1_hp3_a", tf.a.as_ref());
+        (void)sig::cheby2(3, 40.0, wlp, sig::FilterType::kLowpass, false, tf);
+        print_vec("cheby2_lp3_b", tf.b.as_ref()); print_vec("cheby2_lp3_a", tf.a.as_ref());
+        (void)sig::ellip(3, 1.0, 40.0, wlp, sig::FilterType::kLowpass, false, tf);
+        print_vec("ellip_lp3_b", tf.b.as_ref()); print_vec("ellip_lp3_a", tf.a.as_ref());
+        const f64 wa[1] = {10.0};
+        (void)sig::besself(4, wa, sig::FilterType::kLowpass, true, tf);
+        print_vec("besself_4_b", tf.b.as_ref()); print_vec("besself_4_a", tf.a.as_ref());
+        sig::ZpkResult b9;
+        (void)sig::besselap(9, b9);
+        print_cvec("besselap_9_p", b9.p.as_ref());
+        const f64 ba_b[2] = {1.0, 2.0}, ba_a[3] = {1.0, 3.0, 2.0};
+        (void)sig::bilinear(ba_b, ba_a, 10.0, 0.0, tf);
+        print_vec("bilinear_b", tf.b.as_ref()); print_vec("bilinear_a", tf.a.as_ref());
+        (void)sig::impinvar(ba_b, ba_a, 10.0, tf);
+        print_vec("impinvar_b", tf.b.as_ref()); print_vec("impinvar_a", tf.a.as_ref());
+        sig::OrderResult ord;
+        const f64 wp1[1] = {0.2}, ws1[1] = {0.3};
+        (void)sig::buttord(wp1, ws1, 3.0, 40.0, false, ord);
+        f64 bo_lp[2] = {as<f64>(ord.order), ord.wn[0]}; print_vec("buttord_lp", bo_lp);
+        const f64 wp2[2] = {0.2, 0.5}, ws2[2] = {0.1, 0.6};
+        (void)sig::buttord(wp2, ws2, 3.0, 40.0, false, ord);
+        f64 bo_bp[3] = {as<f64>(ord.order), ord.wn[0], ord.wn[1]}; print_vec("buttord_bp", bo_bp);
+        (void)sig::cheb1ord(wp1, ws1, 3.0, 40.0, false, ord);
+        f64 c1o[2] = {as<f64>(ord.order), ord.wn[0]}; print_vec("cheb1ord_lp", c1o);
+        (void)sig::cheb2ord(wp1, ws1, 3.0, 40.0, false, ord);
+        f64 c2o[2] = {as<f64>(ord.order), ord.wn[0]}; print_vec("cheb2ord_lp", c2o);
+        (void)sig::ellipord(wp1, ws1, 3.0, 40.0, false, ord);
+        f64 elo[2] = {as<f64>(ord.order), ord.wn[0]}; print_vec("ellipord_lp", elo);
+    }
+
+    // 8. FIR & Multirate
+    {
+        f64 f1_lp[21]{}, f1_hp[21]{};
+        (void)sig::fir1_single(20, 0.4, false, f1_lp); print_vec("fir1_lp20", f1_lp);
+        (void)sig::fir1_single(20, 0.4, true, f1_hp); print_vec("fir1_hp20", f1_hp);
+        const f64 fls[4] = {0.0, 0.3, 0.4, 1.0}, als[4] = {1.0, 1.0, 0.0, 0.0};
+        f64 hls[21]{}, hpm[21]{}; f64 err = 0.0;
+        (void)sig::firls(20, fls, als, {}, sig::FirFtype::kStandard, hls); print_vec("firls_20", hls);
+        (void)sig::firpm(20, fls, als, {}, sig::FirFtype::kStandard, hpm, err); print_vec("firpm_20", hpm);
+        const f64 ux[6] = {1.0, 2.0, -1.0, 3.0, 0.5, -2.0};
+        const f64 uh[4] = {0.2, 0.5, 0.3, 0.1};
+        f64 uy[10]{};
+        const usize ulen = sig::upfirdn_length(6, 4, 3, 2);
+        (void)sig::upfirdn(ux, uh, 3, 2, MutArrayRef<f64>(uy, ulen));
+        print_vec("upfirdn_3_2", ArrayRef<f64>(uy, ulen));
+        f64 rx[32]{};
+        for (usize i = 0; i < 32; ++i) rx[i] = keel::sin(0.2 * as<f64>(i));
+        Array<f64> ry, rb;
+        (void)sig::resample(rx, 3, 2, 10, 5.0, ry, &rb);
+        print_vec("resample_3_2", ry.as_ref());
+    }
+
+    // 9. Modeling & Spectral Metrics & Waveforms
+    {
+        f64 x64[64]{};
+        for (usize i = 0; i < 64; ++i) x64[i] = keel::cos(0.4 * as<f64>(i)) + 0.25 * keel::sin(1.1 * as<f64>(i));
+        sig::LevinsonResult yw, bg;
+        (void)sig::aryule(x64, 4, yw); print_vec("aryule_4_a", yw.a.as_ref());
+        (void)sig::arburg(x64, 4, bg); print_vec("arburg_4_a", bg.a.as_ref());
+        Array<f64> aca, amca; f64 ace = 0.0, amce = 0.0;
+        (void)sig::arcov(x64, 4, aca, ace); print_vec("arcov_4_a", aca.as_ref());
+        (void)sig::armcov(x64, 4, amca, amce); print_vec("armcov_4_a", amca.as_ref());
+        const f64 a_t[4] = {1.0, -0.75, 0.5, -0.1};
+        Array<f64> krc, lsf; f64 r0 = 0.0;
+        (void)sig::poly2rc(a_t, 0.25, krc, r0); print_vec("poly2rc_k", krc.as_ref());
+        (void)sig::poly2lsf(a_t, lsf); print_vec("poly2lsf", lsf.as_ref());
+        f64 wh[16]{}; sig::hamming(wh);
+        f64 bw = 0.0; (void)sig::enbw(wh, 1000.0, bw);
+        print_vec("enbw_ham16", ArrayRef<f64>(&bw, 1));
+        const f64 t_w[6] = {-1.0, -0.5, -0.25, 0.0, 0.25, 0.5};
+        f64 o_w[6]{};
+        (void)sig::rectpuls(t_w, 1.0, o_w); print_vec("rectpuls", o_w);
+        (void)sig::tripuls(t_w, 1.0, o_w); print_vec("tripuls", o_w);
+        (void)sig::sinc(t_w, o_w); print_vec("sinc", o_w);
+        (void)sig::diric(t_w, 5, o_w); print_vec("diric_5", o_w);
+        const f64 tc[6] = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5};
+        (void)sig::chirp(tc, 1.0, 1.0, 5.0, sig::ChirpMethod::kLinear, 0.0, sig::ChirpQuadShape::kConcave, o_w);
+        print_vec("chirp_lin", o_w);
+        (void)sig::chirp(tc, 1.0, 1.0, 5.0, sig::ChirpMethod::kQuadratic, 0.0, sig::ChirpQuadShape::kConvex, o_w);
+        print_vec("chirp_qconv", o_w);
+        (void)sig::chirp(tc, 1.0, 1.0, 5.0, sig::ChirpMethod::kLogarithmic, 0.0, sig::ChirpQuadShape::kConcave, o_w);
+        print_vec("chirp_log", o_w);
+        const f64 rf_in[7] = {0.0, 2.0, -1.0, 3.0, -2.0, 1.0, 0.0};
+        Array<sig::RainflowCycle> rfc;
+        (void)sig::rainflow(rf_in, rfc);
+        Array<f64> rf_flat;
+        for (usize i = 0; i < rfc.size(); ++i) {
+            rf_flat.push_back(rfc[i].count);
+            rf_flat.push_back(rfc[i].range);
+            rf_flat.push_back(rfc[i].mean);
+        }
+        print_vec("rainflow", rf_flat.as_ref());
+        // Odd-n envspectrum
+        f64 xe[15]{};
+        for (usize i = 0; i < 15; ++i) {
+            const f64 ti = as<f64>(i) / 15.0;
+            xe[i] = (1.0 + 0.5 * keel::cos(kTau * 2.0 * ti)) * keel::cos(kTau * 5.0 * ti);
+        }
+        Array<f64> es, fe;
+        (void)sig::envspectrum(xe, 15.0, es, fe);
+        print_vec("envspec_15_es", es.as_ref());
+        print_vec("envspec_15_f", fe.as_ref());
+    }
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && keel::StringRef(argv[1]) == "--dump-ref") {
+        dump_reference();
+        return 0;
+    }
     test_windows();
     test_conv();
     test_iir_and_sos();
@@ -1084,11 +1574,12 @@ int main() {
     test_modeling_and_subspace();
     test_spectral_metrics_and_vibration();
     test_waveforms_and_pulse_roi();
+    test_hardening_regressions();
 
     if (g_failures == 0) {
         keel::println("ALL keel::signal TESTS PASSED");
         return 0;
     }
-    keel::eprintln("TOTAL FAILURES: {}", g_failures);
+    keel::eprintln("TOTAL FAILURES: %d", g_failures);
     return 1;
 }

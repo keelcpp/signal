@@ -218,10 +218,10 @@ SignalStatus sosfilt_col_major(ArrayRef<f64> sos, usize num_sections, ArrayRef<f
         copy_f64(y, x);
         return SignalStatus::kOk;
     }
-    if (sos.size() < 6 * num_sections) {
+    if (sos.size() / 6 < num_sections) {
         return SignalStatus::kInvalidArgument;
     }
-    if (!zi.empty() && zi.size() < 2 * num_sections) {
+    if (!zi.empty() && zi.size() / 2 < num_sections) {
         return SignalStatus::kInvalidArgument;
     }
 
@@ -243,7 +243,7 @@ SignalStatus sosfiltfilt_col_major(ArrayRef<f64> sos, usize num_sections, ArrayR
         copy_f64(y, x);
         return SignalStatus::kOk;
     }
-    if (sos.size() < 6 * num_sections) {
+    if (sos.size() / 6 < num_sections) {
         return SignalStatus::kInvalidArgument;
     }
 
@@ -437,18 +437,7 @@ inline c64 eval_freqz_c64_at(ArrayRef<c64> b, ArrayRef<c64> a, f64 w) noexcept {
 }
 
 void unwrap_phase_pi(MutArrayRef<f64> p) noexcept {
-    const usize n = p.size();
-    if (n < 2) return;
-    f64 offset = 0.0;
-    for (usize i = 1; i < n; ++i) {
-        const f64 diff = p[i] + offset - p[i - 1];
-        if (diff > kPi) {
-            offset -= kTau;
-        } else if (diff < -kPi) {
-            offset += kTau;
-        }
-        p[i] += offset;
-    }
+    (void)unwrap_phase(p, p, kTau);
 }
 
 bool is_trivial_denom(ArrayRef<f64> a) noexcept {
@@ -465,7 +454,7 @@ bool is_trivial_denom(ArrayRef<f64> a) noexcept {
 SignalStatus freqz(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> w,
                    MutArrayRef<c64> h_out) noexcept {
     const usize n = w.size();
-    if (h_out.size() < n) return SignalStatus::kInvalidArgument;
+    if (a.empty() || h_out.size() < n) return SignalStatus::kInvalidArgument;
     for (usize k = 0; k < n; ++k) {
         h_out[k] = eval_freqz_real_at(b, a, w[k]);
     }
@@ -475,7 +464,7 @@ SignalStatus freqz(ArrayRef<f64> b, ArrayRef<f64> a, ArrayRef<f64> w,
 SignalStatus freqz_c64(ArrayRef<c64> b, ArrayRef<c64> a, ArrayRef<f64> w,
                        MutArrayRef<c64> h_out) noexcept {
     const usize n = w.size();
-    if (h_out.size() < n) return SignalStatus::kInvalidArgument;
+    if (a.empty() || h_out.size() < n) return SignalStatus::kInvalidArgument;
     for (usize k = 0; k < n; ++k) {
         h_out[k] = eval_freqz_c64_at(b, a, w[k]);
     }
@@ -484,7 +473,8 @@ SignalStatus freqz_c64(ArrayRef<c64> b, ArrayRef<c64> a, ArrayRef<f64> w,
 
 SignalStatus freqz_grid(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, bool whole, f64 fs,
                         MutArrayRef<c64> h_out, MutArrayRef<f64> freq_out) noexcept {
-    if (h_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+    if (a.empty() || !keel::is_finite(fs) || h_out.size() < npts ||
+        (!freq_out.empty() && freq_out.size() < npts)) {
         return SignalStatus::kInvalidArgument;
     }
     if (npts == 0) return SignalStatus::kOk;
@@ -504,7 +494,8 @@ SignalStatus freqz_grid(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, bool whole
 
 SignalStatus freqz_grid_c64(ArrayRef<c64> b, ArrayRef<c64> a, usize npts, bool whole, f64 fs,
                             MutArrayRef<c64> h_out, MutArrayRef<f64> freq_out) noexcept {
-    if (h_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+    if (a.empty() || !keel::is_finite(fs) || h_out.size() < npts ||
+        (!freq_out.empty() && freq_out.size() < npts)) {
         return SignalStatus::kInvalidArgument;
     }
     if (npts == 0) return SignalStatus::kOk;
@@ -524,7 +515,8 @@ SignalStatus freqz_grid_c64(ArrayRef<c64> b, ArrayRef<c64> a, usize npts, bool w
 
 SignalStatus phasez(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, f64 fs,
                     MutArrayRef<f64> phi_out, MutArrayRef<f64> freq_out) noexcept {
-    if (phi_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+    if (a.empty() || !keel::is_finite(fs) || phi_out.size() < npts ||
+        (!freq_out.empty() && freq_out.size() < npts)) {
         return SignalStatus::kInvalidArgument;
     }
     if (npts == 0) return SignalStatus::kOk;
@@ -547,7 +539,8 @@ SignalStatus phasez(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, f64 fs,
 
 SignalStatus phasez_c64(ArrayRef<c64> b, ArrayRef<c64> a, usize npts, f64 fs,
                         MutArrayRef<f64> phi_out, MutArrayRef<f64> freq_out) noexcept {
-    if (phi_out.size() < npts || (!freq_out.empty() && freq_out.size() < npts)) {
+    if (a.empty() || !keel::is_finite(fs) || phi_out.size() < npts ||
+        (!freq_out.empty() && freq_out.size() < npts)) {
         return SignalStatus::kInvalidArgument;
     }
     if (npts == 0) return SignalStatus::kOk;
@@ -719,7 +712,7 @@ SignalStatus phasedelay(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, MutArrayRe
 
 SignalStatus zerophase(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, MutArrayRef<f64> hr_out,
                        MutArrayRef<f64> w_out) noexcept {
-    if (hr_out.size() < npts || (!w_out.empty() && w_out.size() < npts)) {
+    if (a.empty() || hr_out.size() < npts || (!w_out.empty() && w_out.size() < npts)) {
         return SignalStatus::kInvalidArgument;
     }
     if (npts == 0) return SignalStatus::kOk;
@@ -738,8 +731,7 @@ SignalStatus zerophase(ArrayRef<f64> b, ArrayRef<f64> a, usize npts, MutArrayRef
 SignalStatus polyscale(ArrayRef<f64> p_col_major, usize rows, usize cols, ArrayRef<f64> scale,
                        MutArrayRef<f64> out_col_major, Allocator* alloc) {
     if (rows == 0 || cols == 0) return SignalStatus::kOk;
-    const usize total = rows * cols;
-    if (p_col_major.size() < total || out_col_major.size() < total) {
+    if (p_col_major.size() / cols < rows || out_col_major.size() / cols < rows) {
         return SignalStatus::kInvalidArgument;
     }
     const bool scalar_s = (scale.size() == 1);
@@ -774,8 +766,7 @@ SignalStatus polyscale(ArrayRef<f64> p_col_major, usize rows, usize cols, ArrayR
 SignalStatus polyscale_c64(ArrayRef<c64> p_col_major, usize rows, usize cols, ArrayRef<c64> scale,
                            MutArrayRef<c64> out_col_major, Allocator* alloc) {
     if (rows == 0 || cols == 0) return SignalStatus::kOk;
-    const usize total = rows * cols;
-    if (p_col_major.size() < total || out_col_major.size() < total) {
+    if (p_col_major.size() / cols < rows || out_col_major.size() / cols < rows) {
         return SignalStatus::kInvalidArgument;
     }
     const bool scalar_s = (scale.size() == 1);

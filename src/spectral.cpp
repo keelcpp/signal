@@ -18,14 +18,20 @@ SignalStatus ar_spectrum(ArrayRef<f64> a, f64 sigma2, usize nfft, MutArrayRef<f6
     if (pxx_out.size() < n_out || freq_out.size() < n_out) {
         return SignalStatus::kInvalidArgument;
     }
+    const bool is_odd = (nfft & usize{1}) != 0;
+    const f64 inv_nfft = 1.0 / as<f64>(nfft);
     for (usize k = 0; k < n_out; ++k) {
-        const f64 w = kPi * as<f64>(k) / as<f64>(n_out - 1);
+        const f64 w = kTau * as<f64>(k) * inv_nfft;
         c64 poly_a(1.0, 0.0);
         for (usize i = 0; i < a.size(); ++i) {
             poly_a += a[i] * keel::polar(1.0, -w * as<f64>(i + 1));
         }
         const f64 mag2 = keel::norm(poly_a);
-        pxx_out[k] = (mag2 > 0.0) ? (sigma2 / mag2) : 0.0;
+        f64 psd = (mag2 > 0.0) ? (sigma2 / (kTau * mag2)) : 0.0;
+        if (k > 0 && (is_odd || k < nfft / 2)) {
+            psd *= 2.0;
+        }
+        pxx_out[k] = psd;
         freq_out[k] = w;
     }
     return SignalStatus::kOk;
@@ -50,6 +56,9 @@ SignalStatus cross_welch_impl(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> wi
     f64 win_power = 0.0;
     for (usize i = 0; i < win_len; ++i) {
         win_power += window[i] * window[i];
+    }
+    if (!keel::is_finite(win_power) || !(win_power > 0.0)) {
+        return SignalStatus::kInvalidArgument;
     }
 
     const usize n_out = nfft / 2 + 1;
@@ -99,7 +108,7 @@ SignalStatus stft_impl(ArrayRef<SampleT> x, ArrayRef<f64> window, usize noverlap
     const bool is_one_sided = (range == StftRange::kOneSided);
     const bool is_centered = (range == StftRange::kCentered);
     const usize out_rows = is_one_sided ? (nfft / 2 + 1) : nfft;
-    if (s_colmajor.size() < out_rows * k_frames) {
+    if (s_colmajor.size() / k_frames < out_rows) {
         return SignalStatus::kInvalidArgument;
     }
 
@@ -137,7 +146,7 @@ SignalStatus stft_impl(ArrayRef<SampleT> x, ArrayRef<f64> window, usize noverlap
 SignalStatus periodogram(ArrayRef<f64> x, ArrayRef<f64> window, usize nfft, f64 fs,
                          MutArrayRef<f64> pxx_out, MutArrayRef<f64> freq_out, Allocator* alloc) {
     const usize n = x.size();
-    if (n == 0 || nfft == 0 || !(fs > 0.0)) {
+    if (n == 0 || nfft == 0 || !keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n_out = nfft / 2 + 1;
@@ -159,18 +168,23 @@ SignalStatus periodogram(ArrayRef<f64> x, ArrayRef<f64> window, usize nfft, f64 
             buf[i] = x[i] * w;
         }
     }
+    if (!keel::is_finite(win_power) || !(win_power > 0.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
 
     Array<c64> spec(n_out, c64(0.0, 0.0), alloc);
     keel::fft::rfft_1d(buf.as_ref(), spec.as_mut_ref());
 
+    const bool is_odd = (nfft & usize{1}) != 0;
     const f64 scale = 1.0 / (win_power * fs);
+    const f64 df = fs / as<f64>(nfft);
     for (usize i = 0; i < n_out; ++i) {
         f64 mag2 = keel::norm(spec[i]);
-        if (i > 0 && i < nfft / 2) {
+        if (i > 0 && (is_odd || i < nfft / 2)) {
             mag2 *= 2.0;
         }
         pxx_out[i] = mag2 * scale;
-        freq_out[i] = (n_out > 1) ? ((0.5 * fs) * as<f64>(i) / as<f64>(n_out - 1)) : 0.0;
+        freq_out[i] = df * as<f64>(i);
     }
     return SignalStatus::kOk;
 }
@@ -179,7 +193,7 @@ SignalStatus periodogram_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize nfft, 
                              MutArrayRef<f64> pxx_out, MutArrayRef<f64> freq_out,
                              Allocator* alloc) {
     const usize n = x.size();
-    if (n == 0 || nfft == 0 || !(fs > 0.0)) {
+    if (n == 0 || nfft == 0 || !keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     if (pxx_out.size() < nfft || freq_out.size() < nfft) {
@@ -200,6 +214,9 @@ SignalStatus periodogram_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize nfft, 
             buf[i] = x[i] * w;
         }
     }
+    if (!keel::is_finite(win_power) || !(win_power > 0.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
     keel::fft::fft_1d_inplace(buf.as_mut_ref());
 
     const f64 scale = 1.0 / (win_power * fs);
@@ -214,7 +231,8 @@ SignalStatus pwelch(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, usize
                     MutArrayRef<f64> pxx_out, MutArrayRef<f64> freq_out, Allocator* alloc) {
     const usize nx = x.size();
     const usize win_len = window.size();
-    if (nx == 0 || win_len == 0 || noverlap >= win_len || nfft < win_len || !(fs > 0.0)) {
+    if (nx == 0 || win_len == 0 || noverlap >= win_len || nfft < win_len ||
+        !keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n_out = nfft / 2 + 1;
@@ -226,6 +244,9 @@ SignalStatus pwelch(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, usize
     for (usize i = 0; i < win_len; ++i) {
         win_power += window[i] * window[i];
     }
+    if (!keel::is_finite(win_power) || !(win_power > 0.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
 
     for (usize i = 0; i < n_out; ++i) {
         pxx_out[i] = 0.0;
@@ -233,6 +254,7 @@ SignalStatus pwelch(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, usize
     Array<f64> seg(nfft, 0.0, alloc);
     Array<c64> spec(n_out, c64(0.0, 0.0), alloc);
 
+    const bool is_odd = (nfft & usize{1}) != 0;
     const usize step = win_len - noverlap;
     usize n_segments = 0;
     for (usize start = 0; start + win_len <= nx; start += step) {
@@ -245,7 +267,7 @@ SignalStatus pwelch(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, usize
         keel::fft::rfft_1d(seg.as_ref(), spec.as_mut_ref());
         for (usize i = 0; i < n_out; ++i) {
             f64 mag2 = keel::norm(spec[i]);
-            if (i > 0 && i < nfft / 2) {
+            if (i > 0 && (is_odd || i < nfft / 2)) {
                 mag2 *= 2.0;
             }
             pxx_out[i] += mag2;
@@ -254,9 +276,10 @@ SignalStatus pwelch(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, usize
     }
 
     const f64 scale = (n_segments > 0) ? (1.0 / (win_power * fs * as<f64>(n_segments))) : 0.0;
+    const f64 df = fs / as<f64>(nfft);
     for (usize i = 0; i < n_out; ++i) {
         pxx_out[i] *= scale;
-        freq_out[i] = (n_out > 1) ? ((0.5 * fs) * as<f64>(i) / as<f64>(n_out - 1)) : 0.0;
+        freq_out[i] = df * as<f64>(i);
     }
     return SignalStatus::kOk;
 }
@@ -265,7 +288,8 @@ SignalStatus pwelch_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize noverlap, u
                         MutArrayRef<f64> pxx_out, MutArrayRef<f64> freq_out, Allocator* alloc) {
     const usize nx = x.size();
     const usize win_len = window.size();
-    if (nx == 0 || win_len == 0 || noverlap >= win_len || nfft < win_len || !(fs > 0.0)) {
+    if (nx == 0 || win_len == 0 || noverlap >= win_len || nfft < win_len ||
+        !keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     if (pxx_out.size() < nfft || freq_out.size() < nfft) {
@@ -275,6 +299,9 @@ SignalStatus pwelch_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize noverlap, u
     f64 win_power = 0.0;
     for (usize i = 0; i < win_len; ++i) {
         win_power += window[i] * window[i];
+    }
+    if (!keel::is_finite(win_power) || !(win_power > 0.0)) {
+        return SignalStatus::kInvalidArgument;
     }
 
     for (usize i = 0; i < nfft; ++i) {
@@ -309,7 +336,7 @@ SignalStatus pwelch_c64(ArrayRef<c64> x, ArrayRef<f64> window, usize noverlap, u
 SignalStatus cpsd(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, usize noverlap,
                   usize nfft, f64 fs, MutArrayRef<c64> pxy_out, MutArrayRef<f64> freq_out,
                   Allocator* alloc) {
-    if (!(fs > 0.0)) {
+    if (!keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n_out = nfft / 2 + 1;
@@ -321,15 +348,17 @@ SignalStatus cpsd(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, usize 
     if (st != SignalStatus::kOk) {
         return st;
     }
+    const bool is_odd = (nfft & usize{1}) != 0;
     const f64 scale =
         (acc.n_segments > 0) ? (1.0 / (acc.win_power * fs * as<f64>(acc.n_segments))) : 0.0;
+    const f64 df = fs / as<f64>(nfft);
     for (usize i = 0; i < n_out; ++i) {
         c64 s = acc.sxy[i] * scale;
-        if (i > 0 && i < nfft / 2) {
+        if (i > 0 && (is_odd || i < nfft / 2)) {
             s *= 2.0;
         }
         pxy_out[i] = s;
-        freq_out[i] = (n_out > 1) ? ((0.5 * fs) * as<f64>(i) / as<f64>(n_out - 1)) : 0.0;
+        freq_out[i] = df * as<f64>(i);
     }
     return SignalStatus::kOk;
 }
@@ -337,7 +366,7 @@ SignalStatus cpsd(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, usize 
 SignalStatus mscohere(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, usize noverlap,
                       usize nfft, f64 fs, MutArrayRef<f64> cxy_out, MutArrayRef<f64> freq_out,
                       Allocator* alloc) {
-    if (!(fs > 0.0)) {
+    if (!keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n_out = nfft / 2 + 1;
@@ -349,10 +378,11 @@ SignalStatus mscohere(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, us
     if (st != SignalStatus::kOk) {
         return st;
     }
+    const f64 df = fs / as<f64>(nfft);
     for (usize i = 0; i < n_out; ++i) {
         const f64 denom = acc.sxx[i] * acc.syy[i];
         cxy_out[i] = (denom > 0.0) ? (keel::norm(acc.sxy[i]) / denom) : 0.0;
-        freq_out[i] = (n_out > 1) ? ((0.5 * fs) * as<f64>(i) / as<f64>(n_out - 1)) : 0.0;
+        freq_out[i] = df * as<f64>(i);
     }
     return SignalStatus::kOk;
 }
@@ -360,7 +390,7 @@ SignalStatus mscohere(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, us
 SignalStatus tfestimate(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, usize noverlap,
                         usize nfft, f64 fs, MutArrayRef<c64> txy_out, MutArrayRef<f64> freq_out,
                         Allocator* alloc) {
-    if (!(fs > 0.0)) {
+    if (!keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n_out = nfft / 2 + 1;
@@ -372,10 +402,11 @@ SignalStatus tfestimate(ArrayRef<f64> x, ArrayRef<f64> y, ArrayRef<f64> window, 
     if (st != SignalStatus::kOk) {
         return st;
     }
+    const f64 df = fs / as<f64>(nfft);
     for (usize i = 0; i < n_out; ++i) {
         const c64 syx = keel::conj(acc.sxy[i]);
         txy_out[i] = (acc.sxx[i] > 0.0) ? (syx / acc.sxx[i]) : c64(0.0, 0.0);
-        freq_out[i] = (n_out > 1) ? ((0.5 * fs) * as<f64>(i) / as<f64>(n_out - 1)) : 0.0;
+        freq_out[i] = df * as<f64>(i);
     }
     return SignalStatus::kOk;
 }
@@ -477,7 +508,7 @@ SignalStatus spectrogram(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, 
     const usize step = win_len - noverlap;
     const usize n_seg = (nx - win_len) / step + 1;
     const usize n_freqs = nfft / 2 + 1;
-    if (s_colmajor.size() < n_freqs * n_seg || freq_out.size() < n_freqs ||
+    if (s_colmajor.size() / n_seg < n_freqs || freq_out.size() < n_freqs ||
         time_out.size() < n_seg) {
         return SignalStatus::kInvalidArgument;
     }
@@ -498,8 +529,9 @@ SignalStatus spectrogram(ArrayRef<f64> x, ArrayRef<f64> window, usize noverlap, 
         }
         time_out[seg] = as<f64>(start + win_len / 2);
     }
+    const f64 dw = kTau / as<f64>(nfft);
     for (usize i = 0; i < n_freqs; ++i) {
-        freq_out[i] = (n_freqs > 1) ? (kPi * as<f64>(i) / as<f64>(n_freqs - 1)) : 0.0;
+        freq_out[i] = dw * as<f64>(i);
     }
     return SignalStatus::kOk;
 }
@@ -529,7 +561,7 @@ SignalStatus istft(ArrayRef<c64> s_colmajor, usize in_rows, usize n_frames, Arra
     if (is_one_sided && in_rows != nfft / 2 + 1) {
         return SignalStatus::kInvalidArgument;
     }
-    if (s_colmajor.size() < in_rows * n_frames) {
+    if (s_colmajor.size() / n_frames < in_rows) {
         return SignalStatus::kInvalidArgument;
     }
     const usize hop = m - noverlap;

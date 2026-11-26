@@ -279,8 +279,13 @@ SignalStatus medfilt1(ArrayRef<f64> x, usize k, bool zeropad, MutArrayRef<f64> o
 
     Array<f64> win(alloc);
     win.reserve(k);
+    usize nan_count = 0;
 
     auto insert_sorted = [&](f64 val) {
+        if (keel::is_nan(val)) {
+            ++nan_count;
+            return;
+        }
         const usize idx = keel::upper_bound(win.as_ref(), val);
         win.push_back(0.0);
         if (idx + 1 < win.size()) {
@@ -290,7 +295,21 @@ SignalStatus medfilt1(ArrayRef<f64> x, usize k, bool zeropad, MutArrayRef<f64> o
         win[idx] = val;
     };
 
+    auto remove_sorted = [&](f64 val) noexcept {
+        if (keel::is_nan(val)) {
+            if (nan_count > 0) --nan_count;
+            return;
+        }
+        const usize pos = keel::lower_bound(win.as_ref(), val);
+        if (pos < win.size() && win[pos] == val) {
+            win.erase(pos);
+        }
+    };
+
     auto compute_median = [&]() noexcept -> f64 {
+        if (nan_count > 0) {
+            return Limits<f64>::quiet_nan();
+        }
         const usize m = win.size();
         if (!zeropad) {
             if (m == 0) return 0.0;
@@ -325,10 +344,7 @@ SignalStatus medfilt1(ArrayRef<f64> x, usize k, bool zeropad, MutArrayRef<f64> o
         }
         hi = new_hi;
         for (usize j = lo; j < new_lo; ++j) {
-            const usize pos = keel::lower_bound(win.as_ref(), src[j]);
-            if (pos < win.size() && win[pos] == src[j]) {
-                win.erase(pos);
-            }
+            remove_sorted(src[j]);
         }
         lo = new_lo;
         out[i] = compute_median();
@@ -364,7 +380,7 @@ SignalStatus sgolay(i32 order, i32 framelen, MutArrayRef<f64> b_rowmajor,
             return SignalStatus::kInvalidArgument;
         }
         for (usize i = 0; i < n; ++i) {
-            if (!(weights[i] > 0.0)) {
+            if (!keel::is_finite(weights[i]) || !(weights[i] > 0.0)) {
                 return SignalStatus::kInvalidArgument;
             }
         }

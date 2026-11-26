@@ -11,9 +11,75 @@ namespace keel::signal {
 namespace {
 
 constexpr f64 kImagThresh = 1e-10;
+constexpr f64 kConjTol = 1e-2;
 
 inline bool is_real_root(c64 r) noexcept {
     return keel::abs(r.imag()) <= kImagThresh;
+}
+
+// Partition a root set into clean conjugate pairs (forced exact conjugates) and real roots,
+// using minimum-distance greedy matching so perturbed multiple roots (e.g. 4-fold/8-fold
+// Butterworth zeros at z = -1) always pair cleanly without threshold straddling.
+bool canonicalize_roots(ArrayRef<c64> in, Array<c64>& out, Allocator* alloc) {
+    const usize n = in.size();
+    Array<u8> used(n, u8{0}, alloc);
+    out = Array<c64>(alloc);
+    out.reserve(n);
+
+    // 1. Collect genuinely real roots first.
+    for (usize i = 0; i < n; ++i) {
+        if (is_real_root(in[i])) {
+            used[i] = 1;
+            out.push_back(c64(in[i].real(), 0.0));
+        }
+    }
+
+    // 2. Greedily pair remaining complex roots in ascending order of |in[j] - conj(in[i])|.
+    for (;;) {
+        usize best_i = n;
+        usize best_j = n;
+        f64 best_rel = Limits<f64>::infinity();
+        for (usize i = 0; i < n; ++i) {
+            if (used[i] != 0) continue;
+            const c64 ci = keel::conj(in[i]);
+            const f64 scale_i = keel::max(1.0, keel::abs(in[i]));
+            for (usize j = i + 1; j < n; ++j) {
+                if (used[j] != 0) continue;
+                const f64 scale = keel::max(scale_i, keel::abs(in[j]));
+                const f64 rel = keel::abs(in[j] - ci) / scale;
+                if (rel < best_rel) {
+                    best_rel = rel;
+                    best_i = i;
+                    best_j = j;
+                }
+            }
+        }
+        if (best_i >= n || best_rel > kConjTol) {
+            break;
+        }
+        used[best_i] = 1;
+        used[best_j] = 1;
+        const f64 re = 0.5 * (in[best_i].real() + in[best_j].real());
+        const f64 im = 0.5 * (keel::abs(in[best_i].imag()) + keel::abs(in[best_j].imag()));
+        if (im <= kImagThresh) {
+            out.push_back(c64(re, 0.0));
+            out.push_back(c64(re, 0.0));
+        } else {
+            out.push_back(c64(re, im));
+            out.push_back(c64(re, -im));
+        }
+    }
+
+    // 3. Any remaining unpaired root must have tiny imaginary part (perturbed real root).
+    for (usize i = 0; i < n; ++i) {
+        if (used[i] != 0) continue;
+        const f64 scale = keel::max(1.0, keel::abs(in[i]));
+        if (keel::abs(in[i].imag()) > kConjTol * scale) {
+            return false;
+        }
+        out.push_back(c64(in[i].real(), 0.0));
+    }
+    return true;
 }
 
 struct RootPair {
@@ -179,8 +245,12 @@ SignalStatus zp2sos(ArrayRef<c64> zeros_in, ArrayRef<c64> poles_in, f64 gain,
         return SignalStatus::kInvalidArgument;
     }
     ArenaTemp scratch = keel::get_scratch(alloc);
-    Array<c64> zeros(zeros_in, scratch.allocator());
-    Array<c64> poles(poles_in, scratch.allocator());
+    Array<c64> zeros(scratch.allocator());
+    Array<c64> poles(scratch.allocator());
+    if (!canonicalize_roots(zeros_in, zeros, scratch.allocator()) ||
+        !canonicalize_roots(poles_in, poles, scratch.allocator())) {
+        return SignalStatus::kInvalidArgument;
+    }
 
     const usize num_sec = (poles.size() + 1) / 2;
     Array<f64> b1s(num_sec, 0.0, scratch.allocator());
@@ -246,7 +316,14 @@ SignalStatus tf2sos(ArrayRef<c64> b, ArrayRef<c64> a, SosResult& out, Allocator*
         return SignalStatus::kInvalidArgument;
     }
     ArenaTemp scratch = keel::get_scratch(alloc);
-    const f64 gain = (b[0] / a[0]).real();
+    c64 b_lead(0.0, 0.0);
+    for (usize i = 0; i < b.size(); ++i) {
+        if (b[i] != c64(0.0, 0.0)) {
+            b_lead = b[i];
+            break;
+        }
+    }
+    const f64 gain = (b_lead / a[0]).real();
     const Array<c64> zeros = keel::poly::roots(b, scratch.allocator());
     const Array<c64> poles = keel::poly::roots(a, scratch.allocator());
     return zp2sos(zeros.as_ref(), poles.as_ref(), gain, /*surplus_at_origin=*/false, out, alloc);
@@ -260,7 +337,14 @@ SignalStatus tf2sos(ArrayRef<f64> b, ArrayRef<f64> a, SosResult& out, Allocator*
         return SignalStatus::kInvalidArgument;
     }
     ArenaTemp scratch = keel::get_scratch(alloc);
-    const f64 gain = b[0] / a[0];
+    f64 b_lead = 0.0;
+    for (usize i = 0; i < b.size(); ++i) {
+        if (b[i] != 0.0) {
+            b_lead = b[i];
+            break;
+        }
+    }
+    const f64 gain = b_lead / a[0];
     const Array<c64> zeros = keel::poly::roots(b, scratch.allocator());
     const Array<c64> poles = keel::poly::roots(a, scratch.allocator());
     return zp2sos(zeros.as_ref(), poles.as_ref(), gain, /*surplus_at_origin=*/false, out, alloc);
@@ -268,7 +352,7 @@ SignalStatus tf2sos(ArrayRef<f64> b, ArrayRef<f64> a, SosResult& out, Allocator*
 
 SignalStatus sos2tf(ArrayRef<f64> sos_col_major, usize num_sections, f64 gain, TfResult& out,
                     Allocator* alloc) {
-    if (num_sections == 0 || sos_col_major.size() < 6 * num_sections) {
+    if (num_sections == 0 || sos_col_major.size() / 6 < num_sections) {
         return SignalStatus::kInvalidArgument;
     }
     ArenaTemp scratch = keel::get_scratch(alloc);
@@ -294,7 +378,7 @@ SignalStatus sos2tf(ArrayRef<f64> sos_col_major, usize num_sections, f64 gain, T
 
 SignalStatus sos2zp(ArrayRef<f64> sos_col_major, usize num_sections, f64 gain, ZpkResult& out,
                     Allocator* alloc) {
-    if (num_sections == 0 || sos_col_major.size() < 6 * num_sections) {
+    if (num_sections == 0 || sos_col_major.size() / 6 < num_sections) {
         return SignalStatus::kInvalidArgument;
     }
     ArenaTemp scratch = keel::get_scratch(alloc);
@@ -362,7 +446,7 @@ SignalStatus tf2ss(ArrayRef<f64> b, ArrayRef<f64> a, StateSpaceResult& out, Allo
 
 SignalStatus ss2tf(ArrayRef<f64> a_col_major, usize order, ArrayRef<f64> b, ArrayRef<f64> c, f64 d,
                    TfResult& out, Allocator* alloc) {
-    if (a_col_major.size() < order * order || b.size() < order || c.size() < order) {
+    if ((order > 0 && a_col_major.size() / order < order) || b.size() < order || c.size() < order) {
         return SignalStatus::kInvalidArgument;
     }
     if (order == 0) {

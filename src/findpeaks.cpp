@@ -51,7 +51,8 @@ f64 peak_width(ArrayRef<f64> x, usize pi, f64 h, f64 prom, usize lb, usize rb,
                     break;
                 }
                 if (x[k] <= ref) {
-                    const f64 f = (ref - x[k]) / (x[k + 1] - x[k]);
+                    const f64 dx = x[k + 1] - x[k];
+                    const f64 f = (dx != 0.0) ? ((ref - x[k]) / dx) : 0.0;
                     lcross = pos(k) + f * (pos(k + 1) - pos(k));
                     crossed = true;
                     break;
@@ -71,7 +72,8 @@ f64 peak_width(ArrayRef<f64> x, usize pi, f64 h, f64 prom, usize lb, usize rb,
                     break;
                 }
                 if (x[k] <= ref) {
-                    const f64 f = (ref - x[k]) / (x[k - 1] - x[k]);
+                    const f64 dx = x[k - 1] - x[k];
+                    const f64 f = (dx != 0.0) ? ((ref - x[k]) / dx) : 0.0;
                     rcross = pos(k) - f * (pos(k) - pos(k - 1));
                     crossed = true;
                     break;
@@ -91,7 +93,8 @@ f64 peak_width(ArrayRef<f64> x, usize pi, f64 h, f64 prom, usize lb, usize rb,
     f64 lcross = pos(lb);
     for (usize j = pi; j > lb; --j) {
         if (x[j - 1] < ref && x[j] >= ref) {
-            const f64 f = (ref - x[j - 1]) / (x[j] - x[j - 1]);
+            const f64 dx = x[j] - x[j - 1];
+            const f64 f = (dx != 0.0) ? ((ref - x[j - 1]) / dx) : 0.0;
             lcross = pos(j - 1) + f * (pos(j) - pos(j - 1));
             break;
         }
@@ -99,7 +102,8 @@ f64 peak_width(ArrayRef<f64> x, usize pi, f64 h, f64 prom, usize lb, usize rb,
     f64 rcross = pos(rb);
     for (usize j = pi; j < rb; ++j) {
         if (x[j] >= ref && x[j + 1] < ref) {
-            const f64 f = (x[j] - ref) / (x[j] - x[j + 1]);
+            const f64 dx = x[j] - x[j + 1];
+            const f64 f = (dx != 0.0) ? ((x[j] - ref) / dx) : 0.0;
             rcross = pos(j) + f * (pos(j + 1) - pos(j));
             break;
         }
@@ -113,6 +117,12 @@ SignalStatus findpeaks(ArrayRef<f64> x, ArrayRef<f64> locations, const PeakOptio
                        PeakResult& out, Allocator* alloc) {
     const usize n = x.size();
     if (!locations.empty() && locations.size() < n) {
+        return SignalStatus::kInvalidArgument;
+    }
+    if (keel::is_nan(opts.min_height) || keel::is_nan(opts.threshold) ||
+        (opts.use_min_prom && keel::is_nan(opts.min_prom)) ||
+        (opts.use_min_dist && keel::is_nan(opts.min_dist)) ||
+        (opts.use_width_filter && (keel::is_nan(opts.min_width) || keel::is_nan(opts.max_width)))) {
         return SignalStatus::kInvalidArgument;
     }
 

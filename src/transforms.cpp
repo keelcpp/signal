@@ -64,17 +64,28 @@ SignalStatus unwrap_phase(ArrayRef<f64> phase, MutArrayRef<f64> out, f64 period)
     if (n == 0) {
         return SignalStatus::kOk;
     }
-    if (period <= 0.0) {
+    if (!keel::is_finite(period) || !(period > 0.0)) {
         for (usize i = 0; i < n; ++i) {
             out[i] = phase[i];
         }
         return SignalStatus::kOk;
     }
-    f64 prev_in = phase[0];
-    f64 prev_out = prev_in;
-    out[0] = prev_out;
-    for (usize i = 1; i < n; ++i) {
+    bool have_prev = false;
+    f64 prev_in = 0.0;
+    f64 prev_out = 0.0;
+    for (usize i = 0; i < n; ++i) {
         const f64 cur_in = phase[i];
+        if (!keel::is_finite(cur_in)) {
+            out[i] = cur_in;
+            continue;
+        }
+        if (!have_prev) {
+            prev_in = cur_in;
+            prev_out = cur_in;
+            out[i] = prev_out;
+            have_prev = true;
+            continue;
+        }
         f64 d = cur_in - prev_in;
         d -= period * keel::round(d / period);
         prev_out += d;
@@ -85,7 +96,7 @@ SignalStatus unwrap_phase(ArrayRef<f64> phase, MutArrayRef<f64> out, f64 period)
 }
 
 SignalStatus dftmtx(usize n, MutArrayRef<c64> out_col_major) noexcept {
-    if (n == 0 || out_col_major.size() < n * n) {
+    if (n == 0 || out_col_major.size() / n < n) {
         return SignalStatus::kInvalidArgument;
     }
     const f64 base = -kTau / as<f64>(n);
@@ -184,9 +195,11 @@ SignalStatus cceps(ArrayRef<f64> x, MutArrayRef<f64> out, f64* nd_out, Allocator
     for (usize i = 0; i < n; ++i) {
         const f64 mag = keel::abs(buf[i]);
         f64 phase = keel::arg(buf[i]);
-        while (phase - prev_phase > kPi) phase -= kTau;
-        while (phase - prev_phase < -kPi) phase += kTau;
-        prev_phase = phase;
+        if (keel::is_finite(phase)) {
+            const f64 d = phase - prev_phase;
+            phase = prev_phase + (d - kTau * keel::round(d / kTau));
+            prev_phase = phase;
+        }
         ph[i] = phase;
         lmag[i] = keel::log(keel::max(mag, 1e-300));
     }
@@ -229,12 +242,25 @@ usize czt_next_pow2(usize n) noexcept {
 SignalStatus czt_batch(ArrayRef<c64> x_col_major, usize n_rows, usize n_cols, usize m, c64 w, c64 a,
                        MutArrayRef<c64> out_col_major, Allocator* alloc) {
     if (m == 0) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(w.real()) || !keel::is_finite(w.imag()) ||
+        !keel::is_finite(a.real()) || !keel::is_finite(a.imag()) ||
+        (w.real() == 0.0 && w.imag() == 0.0) || (a.real() == 0.0 && a.imag() == 0.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
     if (n_rows == 0 || n_cols == 0) return SignalStatus::kOk;
-    if (x_col_major.size() < n_rows * n_cols || out_col_major.size() < m * n_cols) {
+    if (x_col_major.size() / n_cols < n_rows || out_col_major.size() / n_cols < m) {
         return SignalStatus::kInvalidArgument;
     }
 
     ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<c64> x_copy(scratch.allocator());
+    const c64* x_ptr = x_col_major.data();
+    const usize total_in = n_rows * n_cols;
+    const usize total_out = m * n_cols;
+    if (out_col_major.data() < x_ptr + total_in && x_ptr < out_col_major.data() + total_out) {
+        x_copy = Array<c64>::from(x_col_major.slice(0, total_in), scratch.allocator());
+        x_ptr = x_copy.data();
+    }
     const usize conv_len = czt_next_pow2(n_rows + m - 1);
 
     Array<c64> pre(n_rows, c64(0.0, 0.0), scratch.allocator());
@@ -265,7 +291,7 @@ SignalStatus czt_batch(ArrayRef<c64> x_col_major, usize n_rows, usize n_cols, us
 
     Array<c64> g(conv_len, c64(0.0, 0.0), scratch.allocator());
     for (usize col = 0; col < n_cols; ++col) {
-        const c64* xcol = x_col_major.data() + col * n_rows;
+        const c64* xcol = x_ptr + col * n_rows;
         for (usize n = 0; n < n_rows; ++n) g[n] = xcol[n] * pre[n];
         for (usize n = n_rows; n < conv_len; ++n) g[n] = c64(0.0, 0.0);
         plan.exec_inplace(g.as_mut_ref(), keel::fft::FftDirection::Forward);
@@ -280,8 +306,13 @@ SignalStatus czt_batch(ArrayRef<c64> x_col_major, usize n_rows, usize n_cols, us
 SignalStatus czt_batch_real(ArrayRef<f64> x_col_major, usize n_rows, usize n_cols, usize m, c64 w,
                             c64 a, MutArrayRef<c64> out_col_major, Allocator* alloc) {
     if (m == 0) return SignalStatus::kInvalidArgument;
+    if (!keel::is_finite(w.real()) || !keel::is_finite(w.imag()) ||
+        !keel::is_finite(a.real()) || !keel::is_finite(a.imag()) ||
+        (w.real() == 0.0 && w.imag() == 0.0) || (a.real() == 0.0 && a.imag() == 0.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
     if (n_rows == 0 || n_cols == 0) return SignalStatus::kOk;
-    if (x_col_major.size() < n_rows * n_cols || out_col_major.size() < m * n_cols) {
+    if (x_col_major.size() / n_cols < n_rows || out_col_major.size() / n_cols < m) {
         return SignalStatus::kInvalidArgument;
     }
 

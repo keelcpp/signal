@@ -33,11 +33,19 @@ SignalStatus upfirdn(ArrayRef<f64> x, ArrayRef<f64> h, usize p, usize q, MutArra
         return SignalStatus::kInvalidArgument;
     }
 
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<f64> x_copy(scratch.allocator());
+    const f64* x_base = x.data();
+    if (out.data() < x_base + lx && x_base < out.data() + out_len) {
+        x_copy = Array<f64>::from(x, scratch.allocator());
+        x_base = x_copy.data();
+    }
+
     // Polyphase reversed-subfilter decomposition: pack each phase's taps in
     // reverse order so every output sample reduces to a contiguous unit-stride
     // dot product without allocating or computing dropped samples.
-    Array<usize> sub_off(p, alloc);
-    Array<usize> sub_len(p, alloc);
+    Array<usize> sub_off(p, scratch.allocator());
+    Array<usize> sub_len(p, scratch.allocator());
     usize total_packed = 0;
     for (usize ph = 0; ph < p; ++ph) {
         sub_off[ph] = total_packed;
@@ -45,7 +53,7 @@ SignalStatus upfirdn(ArrayRef<f64> x, ArrayRef<f64> h, usize p, usize q, MutArra
         sub_len[ph] = len;
         total_packed += len;
     }
-    Array<f64> h_poly(total_packed, alloc);
+    Array<f64> h_poly(total_packed, scratch.allocator());
     for (usize ph = 0; ph < p; ++ph) {
         const usize len = sub_len[ph];
         f64* hp = h_poly.data() + sub_off[ph];
@@ -54,7 +62,6 @@ SignalStatus upfirdn(ArrayRef<f64> x, ArrayRef<f64> h, usize p, usize q, MutArra
         }
     }
 
-    const f64* x_base = x.data();
     const i64 ilx = as<i64>(lx);
     for (usize m = 0; m < out_len; ++m) {
         const usize n = m * q;
@@ -117,21 +124,29 @@ SignalStatus fftfilt(ArrayRef<f64> b, ArrayRef<f64> x, usize nfft, MutArrayRef<f
         nfft = next_pow2(block_l + nb - 1);
     }
 
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<f64> x_copy(scratch.allocator());
+    ArrayRef<f64> x_src = x;
+    if (out.data() < x.data() + nx && x.data() < out.data() + nx) {
+        x_copy = Array<f64>::from(x, scratch.allocator());
+        x_src = x_copy.as_ref();
+    }
+
     const usize n_half = nfft / 2 + 1;
-    Array<f64> b_pad(nfft, 0.0, alloc);
+    Array<f64> b_pad(nfft, 0.0, scratch.allocator());
     for (usize i = 0; i < nb; ++i) b_pad[i] = b[i];
-    Array<c64> bf(n_half, c64(0.0, 0.0), alloc);
+    Array<c64> bf(n_half, c64(0.0, 0.0), scratch.allocator());
     keel::fft::rfft_1d(b_pad.as_ref(), bf.as_mut_ref());
 
-    Array<f64> x_pad(nfft, 0.0, alloc);
-    Array<c64> xf(n_half, c64(0.0, 0.0), alloc);
-    Array<f64> y_blk(nfft, 0.0, alloc);
+    Array<f64> x_pad(nfft, 0.0, scratch.allocator());
+    Array<c64> xf(n_half, c64(0.0, 0.0), scratch.allocator());
+    Array<f64> y_blk(nfft, 0.0, scratch.allocator());
 
     for (usize i = 0; i < nx; ++i) out[i] = 0.0;
 
     for (usize pos = 0; pos < nx; pos += block_l) {
         const usize l = keel::min(block_l, nx - pos);
-        for (usize i = 0; i < l; ++i) x_pad[i] = x[pos + i];
+        for (usize i = 0; i < l; ++i) x_pad[i] = x_src[pos + i];
         for (usize i = l; i < nfft; ++i) x_pad[i] = 0.0;
         keel::fft::rfft_1d(x_pad.as_ref(), xf.as_mut_ref());
         for (usize i = 0; i < n_half; ++i) xf[i] *= bf[i];
@@ -169,16 +184,24 @@ SignalStatus fftfilt_c64(ArrayRef<c64> b, ArrayRef<c64> x, usize nfft, MutArrayR
         nfft = next_pow2(block_l + nb - 1);
     }
 
-    Array<c64> bf(nfft, c64(0.0, 0.0), alloc);
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<c64> x_copy(scratch.allocator());
+    ArrayRef<c64> x_src = x;
+    if (out.data() < x.data() + nx && x.data() < out.data() + nx) {
+        x_copy = Array<c64>::from(x, scratch.allocator());
+        x_src = x_copy.as_ref();
+    }
+
+    Array<c64> bf(nfft, c64(0.0, 0.0), scratch.allocator());
     for (usize i = 0; i < nb; ++i) bf[i] = b[i];
     keel::fft::fft_1d_inplace(bf.as_mut_ref());
 
-    Array<c64> xf(nfft, c64(0.0, 0.0), alloc);
+    Array<c64> xf(nfft, c64(0.0, 0.0), scratch.allocator());
     for (usize i = 0; i < nx; ++i) out[i] = c64(0.0, 0.0);
 
     for (usize pos = 0; pos < nx; pos += block_l) {
         const usize l = keel::min(block_l, nx - pos);
-        for (usize i = 0; i < l; ++i) xf[i] = x[pos + i];
+        for (usize i = 0; i < l; ++i) xf[i] = x_src[pos + i];
         for (usize i = l; i < nfft; ++i) xf[i] = c64(0.0, 0.0);
         keel::fft::fft_1d_inplace(xf.as_mut_ref());
         for (usize i = 0; i < nfft; ++i) xf[i] *= bf[i];
@@ -192,8 +215,11 @@ SignalStatus fftfilt_c64(ArrayRef<c64> b, ArrayRef<c64> x, usize nfft, MutArrayR
 }
 
 SignalStatus decimate(ArrayRef<f64> x, usize factor, Array<f64>& out, Allocator* alloc) {
+    if (factor == 0) {
+        return SignalStatus::kInvalidArgument;
+    }
     const usize nx = x.size();
-    if (factor <= 1 || nx == 0) {
+    if (factor == 1 || nx == 0) {
         out = Array<f64>(x, alloc);
         return SignalStatus::kOk;
     }
@@ -228,7 +254,7 @@ constexpr usize gcd_usize(usize a, usize b) noexcept {
 
 SignalStatus resample(ArrayRef<f64> x, usize p, usize q, i32 n_order, f64 beta, Array<f64>& y_out,
                       Array<f64>* b_out, Allocator* alloc) {
-    if (p == 0 || q == 0) {
+    if (p == 0 || q == 0 || !keel::is_finite(beta) || beta < 0.0) {
         return SignalStatus::kInvalidArgument;
     }
     const usize g = gcd_usize(p, q);
@@ -240,7 +266,11 @@ SignalStatus resample(ArrayRef<f64> x, usize p, usize q, i32 n_order, f64 beta, 
     const usize pqmax = keel::max(p, q);
     const f64 fc = 1.0 / (2.0 * as<f64>(pqmax));
     const f64 w_cut = 2.0 * fc;
-    const i32 l_len = 2 * n_eff * as<i32>(pqmax) + 1;
+    const usize l_len_u = 2 * as<usize>(n_eff) * pqmax + 1;
+    if (l_len_u > as<usize>(Limits<i32>::kMax)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const i32 l_len = as<i32>(l_len_u);
     const i32 m_half = (l_len - 1) / 2;
 
     ArenaTemp scratch = keel::get_scratch(alloc);
@@ -258,7 +288,7 @@ SignalStatus resample(ArrayRef<f64> x, usize p, usize q, i32 n_order, f64 beta, 
         sum_fk += fk[as<usize>(i)];
     }
 
-    const f64 scale = as<f64>(p) / sum_fk;
+    const f64 scale = (keel::abs(sum_fk) > 0.0) ? (as<f64>(p) / sum_fk) : 0.0;
     if (b_out != nullptr) {
         *b_out = Array<f64>(as<usize>(l_len), 0.0, alloc);
         for (i32 i = 0; i < l_len; ++i) {

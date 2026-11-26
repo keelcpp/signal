@@ -9,18 +9,38 @@ namespace keel::signal {
 
 namespace {
 
-[[nodiscard]] f64 bessel_i0(f64 x) noexcept {
+[[nodiscard]] f64 bessel_i0_scaled(f64 x) noexcept {
+    const f64 ax = keel::abs(x);
+    if (ax <= 15.0) {
+        f64 sum = 1.0;
+        f64 term = 1.0;
+        for (i32 k = 1; k <= 100; ++k) {
+            const f64 ratio = ax / (2.0 * as<f64>(k));
+            term *= ratio * ratio;
+            sum += term;
+            if (term < 1e-16 * sum) {
+                break;
+            }
+        }
+        return keel::exp(-ax) * sum;
+    }
+    // Asymptotic expansion: exp(-x) * I_0(x) ~ (1 / sqrt(2*pi*x)) * sum_k ((2k-1)!!)^2 / (k! (8x)^k)
     f64 sum = 1.0;
     f64 term = 1.0;
-    for (i32 k = 1; k <= 100; ++k) {
-        const f64 ratio = x / (2.0 * as<f64>(k));
-        term *= ratio * ratio;
+    const f64 inv8x = 1.0 / (8.0 * ax);
+    for (i32 k = 1; k <= 40; ++k) {
+        const f64 odd = as<f64>(2 * k - 1);
+        const f64 next_term = term * (odd * odd) * inv8x / as<f64>(k);
+        if (next_term > term) {
+            break;
+        }
+        term = next_term;
         sum += term;
         if (term < 1e-16 * sum) {
             break;
         }
     }
-    return sum;
+    return sum / keel::sqrt(kTau * ax);
 }
 
 } // namespace
@@ -110,22 +130,34 @@ void triang(MutArrayRef<f64> out) noexcept {
 void kaiser(MutArrayRef<f64> out, f64 beta) noexcept {
     const usize n = out.size();
     if (n == 0) return;
+    if (!keel::is_finite(beta)) {
+        const f64 nan = Limits<f64>::quiet_nan();
+        for (usize i = 0; i < n; ++i) out[i] = nan;
+        return;
+    }
     if (n == 1) {
         out[0] = 1.0;
         return;
     }
-    const f64 denom = bessel_i0(beta);
+    const f64 ab = keel::abs(beta);
+    const f64 denom_s = bessel_i0_scaled(ab);
     const f64 nm1 = as<f64>(n - 1);
     for (usize i = 0; i < n; ++i) {
         const f64 alpha = 2.0 * as<f64>(i) / nm1 - 1.0;
         const f64 inside = 1.0 - alpha * alpha;
-        out[i] = bessel_i0(beta * keel::sqrt(inside > 0.0 ? inside : 0.0)) / denom;
+        const f64 arg = ab * keel::sqrt(inside > 0.0 ? inside : 0.0);
+        out[i] = (bessel_i0_scaled(arg) / denom_s) * keel::exp(arg - ab);
     }
 }
 
 void tukeywin(MutArrayRef<f64> out, f64 r) noexcept {
     const usize n = out.size();
     if (n == 0) return;
+    if (keel::is_nan(r)) {
+        const f64 nan = Limits<f64>::quiet_nan();
+        for (usize i = 0; i < n; ++i) out[i] = nan;
+        return;
+    }
     if (r < 0.0) r = 0.0;
     if (r > 1.0) r = 1.0;
     if (n == 1) {
@@ -262,7 +294,7 @@ void barthannwin(MutArrayRef<f64> out) noexcept {
 }
 
 SignalStatus gausswin(MutArrayRef<f64> out, f64 alpha) noexcept {
-    if (alpha <= 0.0) {
+    if (!keel::is_finite(alpha) || !(alpha > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n = out.size();
@@ -282,7 +314,7 @@ SignalStatus gausswin(MutArrayRef<f64> out, f64 alpha) noexcept {
 }
 
 SignalStatus chebwin(MutArrayRef<f64> out, f64 at_db, Allocator* alloc) {
-    if (at_db <= 0.0) {
+    if (!keel::is_finite(at_db) || !(at_db > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n = out.size();
@@ -342,7 +374,7 @@ SignalStatus chebwin(MutArrayRef<f64> out, f64 at_db, Allocator* alloc) {
 }
 
 SignalStatus taylorwin(MutArrayRef<f64> out, i32 nbar, f64 sll_db, Allocator* alloc) {
-    if (sll_db >= 0.0 || nbar < 2) {
+    if (!keel::is_finite(sll_db) || !(sll_db < 0.0) || nbar < 2) {
         return SignalStatus::kInvalidArgument;
     }
     const usize n = out.size();
@@ -391,12 +423,15 @@ SignalStatus taylorwin(MutArrayRef<f64> out, i32 nbar, f64 sll_db, Allocator* al
 
 SignalStatus dpss(usize n, f64 nw, MutArrayRef<f64> tapers_col_major, MutArrayRef<f64> ratios,
                   Allocator* alloc) {
+    if (!keel::is_finite(nw) || !(nw > 0.0) || (n > 1 && nw >= 0.5 * as<f64>(n))) {
+        return SignalStatus::kInvalidArgument;
+    }
     usize k = ratios.size();
     if (n == 0 || k == 0) {
         return SignalStatus::kOk;
     }
     if (k > n) k = n;
-    if (tapers_col_major.size() < n * k) {
+    if (tapers_col_major.size() / k < n) {
         return SignalStatus::kInvalidArgument;
     }
 

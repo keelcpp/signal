@@ -54,12 +54,15 @@ SignalStatus conv_2d(ArrayRef<f64> a, usize m, usize n, ArrayRef<f64> b, usize p
     if (m == 0 || n == 0 || p == 0 || q == 0) {
         return SignalStatus::kOk;
     }
-    const usize out_r = m + p - 1;
-    const usize out_c = n + q - 1;
-    const usize total = out_r * out_c;
-    if (a.size() < m * n || b.size() < p * q || out.size() < total) {
+    if (a.size() / n < m || b.size() / q < p) {
         return SignalStatus::kInvalidArgument;
     }
+    const usize out_r = m + p - 1;
+    const usize out_c = n + q - 1;
+    if (out.size() / out_c < out_r) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize total = out_r * out_c;
     for (usize idx = 0; idx < total; ++idx) {
         out[idx] = 0.0;
     }
@@ -116,8 +119,12 @@ SignalStatus cconv(ArrayRef<f64> x, ArrayRef<f64> y, usize n, MutArrayRef<f64> o
     if (n == 0) return SignalStatus::kOk;
     for (usize k = 0; k < n; ++k) out[k] = 0.0;
 
-    if (nx > 0 && ny > 0 && n >= nx + ny - 1) {
-        ArenaTemp scratch = keel::get_scratch(alloc);
+    if (nx == 0 || ny == 0) {
+        return SignalStatus::kOk;
+    }
+
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    if (n >= nx + ny - 1) {
         const usize nfft = conv_next_pow2(n);
         const usize nhalf = nfft / 2 + 1;
         Array<f64> xp(nfft, 0.0, scratch.allocator());
@@ -134,13 +141,29 @@ SignalStatus cconv(ArrayRef<f64> x, ArrayRef<f64> y, usize n, MutArrayRef<f64> o
         return SignalStatus::kOk;
     }
 
+    // Fold x and y modulo n so circular convolution matches MATLAB cconv(x, y, n)
+    // even when nx > n or ny > n.
+    Array<f64> xw(n, 0.0, scratch.allocator());
+    Array<f64> yw(n, 0.0, scratch.allocator());
+    for (usize i = 0; i < nx; ++i) xw[i % n] += x[i];
+    for (usize j = 0; j < ny; ++j) yw[j % n] += y[j];
+
+    if (n >= 64) {
+        Array<c64> xf(n, c64(0.0, 0.0), scratch.allocator());
+        Array<c64> yf(n, c64(0.0, 0.0), scratch.allocator());
+        keel::fft::fft_1d_real(xw.as_ref(), xf.as_mut_ref());
+        keel::fft::fft_1d_real(yw.as_ref(), yf.as_mut_ref());
+        for (usize k = 0; k < n; ++k) xf[k] *= yf[k];
+        keel::fft::ifft_1d_inplace(xf.as_mut_ref());
+        for (usize k = 0; k < n; ++k) out[k] = xf[k].real();
+        return SignalStatus::kOk;
+    }
+
     for (usize k = 0; k < n; ++k) {
         f64 s = 0.0;
         for (usize i = 0; i < n; ++i) {
-            const f64 xi = (i < nx) ? x[i] : 0.0;
             const usize j = (k + n - i) % n;
-            const f64 yj = (j < ny) ? y[j] : 0.0;
-            s += xi * yj;
+            s += xw[i] * yw[j];
         }
         out[k] = s;
     }
@@ -337,15 +360,18 @@ SignalStatus xcov(ArrayRef<f64> x, ArrayRef<f64> y, i32 maxlag, XcorrScale scale
 SignalStatus xcorr2(ArrayRef<f64> a, usize ra, usize ca, ArrayRef<f64> b, usize rb, usize cb,
                     MutArrayRef<f64> out, Allocator* alloc) {
     if (ra == 0 || ca == 0 || rb == 0 || cb == 0) return SignalStatus::kOk;
-    const usize r_out = ra + rb - 1;
-    const usize c_out = ca + cb - 1;
-    const usize cells_out = r_out * c_out;
-    if (a.size() < ra * ca || b.size() < rb * cb || out.size() < cells_out) {
+    if (a.size() / ca < ra || b.size() / cb < rb) {
         return SignalStatus::kInvalidArgument;
     }
+    const usize r_out = ra + rb - 1;
+    const usize c_out = ca + cb - 1;
+    if (out.size() / c_out < r_out) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize cells_out = r_out * c_out;
 
-    const usize cells_direct = ra * ca * rb * cb;
-    if (cells_direct > 8192 && cells_out >= 64) {
+    const f64 cells_direct = as<f64>(ra) * as<f64>(ca) * as<f64>(rb) * as<f64>(cb);
+    if (cells_direct > 8192.0 && cells_out >= 64) {
         // 2-D FFT cross-correlation: pad A and flipped B to r_out x c_out, 2-D FFT, multiply, IFFT.
         ArenaTemp scratch = keel::get_scratch(alloc);
         Array<c64> fa(cells_out, c64(0.0, 0.0), scratch.allocator());
@@ -399,12 +425,15 @@ SignalStatus xcorr2(ArrayRef<f64> a, usize ra, usize ca, ArrayRef<f64> b, usize 
 SignalStatus xcorr2_c64(ArrayRef<c64> a, usize ra, usize ca, ArrayRef<c64> b, usize rb, usize cb,
                         MutArrayRef<c64> out) noexcept {
     if (ra == 0 || ca == 0 || rb == 0 || cb == 0) return SignalStatus::kOk;
-    const usize r_out = ra + rb - 1;
-    const usize c_out = ca + cb - 1;
-    const usize cells_out = r_out * c_out;
-    if (a.size() < ra * ca || b.size() < rb * cb || out.size() < cells_out) {
+    if (a.size() / ca < ra || b.size() / cb < rb) {
         return SignalStatus::kInvalidArgument;
     }
+    const usize r_out = ra + rb - 1;
+    const usize c_out = ca + cb - 1;
+    if (out.size() / c_out < r_out) {
+        return SignalStatus::kInvalidArgument;
+    }
+    const usize cells_out = r_out * c_out;
     for (usize k = 0; k < cells_out; ++k) out[k] = c64(0.0, 0.0);
     for (usize i = 0; i < ra; ++i) {
         for (usize j = 0; j < ca; ++j) {
@@ -444,7 +473,7 @@ SignalStatus finddelay(ArrayRef<f64> x, ArrayRef<f64> y, i64 max_lag, i64& out_d
         const i64 lag = as<i64>(lags[i]);
         if (max_lag > 0 && keel::abs(lag) > max_lag) continue;
         const f64 mag = keel::abs(c[i]);
-        if (mag > best_mag) {
+        if (keel::is_finite(mag) && mag > best_mag) {
             best_mag = mag;
             best_lag = lag;
         }

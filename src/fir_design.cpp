@@ -100,7 +100,7 @@ inline f64 islin_real(f64 alpha, f64 w, f64 w0) noexcept {
 
 inline i32 next_pow2_i32(i32 v) noexcept {
     i32 p = 1;
-    while (p < v) p <<= 1;
+    while (p < v && p <= (i32{1} << 29)) p <<= 1;
     return p;
 }
 
@@ -128,24 +128,25 @@ struct PmGridPoint {
 } // namespace
 
 SignalStatus fir1_single(i32 order, f64 wn, bool highpass, MutArrayRef<f64> out_b) noexcept {
-    if (order < 1 || !(wn > 0.0 && wn < 1.0)) return SignalStatus::kInvalidArgument;
+    if (order < 1 || !is_finite(wn) || !(wn > 0.0 && wn < 1.0)) return SignalStatus::kInvalidArgument;
+    if (highpass && ((order & 1) != 0)) return SignalStatus::kInvalidArgument;
     const usize filt_len = as<usize>(order + 1);
     if (out_b.size() != filt_len) return SignalStatus::kInvalidArgument;
 
     const f64 wc = kPi * wn;
     const f64 half = as<f64>(order) / 2.0;
-    f64 h_sum = 0.0;
+    const f64 f0 = highpass ? 1.0 : 0.0;
+    f64 gain = 0.0;
     for (usize i = 0; i < filt_len; ++i) {
         const f64 n = as<f64>(i) - half;
-        const f64 sinc = (abs(n) < 1e-12) ? (wc / kPi) : (sin(wc * n) / (kPi * n));
+        const f64 lp = (abs(n) < 1e-12) ? (wc / kPi) : (sin(wc * n) / (kPi * n));
+        const f64 ideal = highpass ? (((abs(n) < 1e-12) ? 1.0 : 0.0) - lp) : lp;
         const f64 win = 0.54 - 0.46 * cos(kTau * as<f64>(i) / as<f64>(order));
-        out_b[i] = sinc * win;
-        h_sum += out_b[i];
+        out_b[i] = ideal * win;
+        gain += out_b[i] * cos(kPi * f0 * n);
     }
-    for (usize i = 0; i < filt_len; ++i) out_b[i] /= h_sum;
-    if (highpass) {
-        for (usize i = 0; i < filt_len; ++i) out_b[i] = -out_b[i];
-        out_b[as<usize>(half)] += 1.0;
+    if (abs(gain) > 1e-15) {
+        for (usize i = 0; i < filt_len; ++i) out_b[i] /= gain;
     }
     return SignalStatus::kOk;
 }
@@ -218,8 +219,9 @@ SignalStatus fir2(i32 order, ArrayRef<f64> f, ArrayRef<f64> m, i32 npt_in, i32 l
     const usize nf = f.size();
     if (order <= 0 || nf < 2 || m.size() != nf) return SignalStatus::kInvalidArgument;
     if (f[0] != 0.0 || f[nf - 1] != 1.0) return SignalStatus::kInvalidArgument;
-    for (usize i = 1; i < nf; ++i) {
-        if (f[i] < f[i - 1]) return SignalStatus::kInvalidArgument;
+    for (usize i = 0; i < nf; ++i) {
+        if (!is_finite(f[i]) || !is_finite(m[i])) return SignalStatus::kInvalidArgument;
+        if (i > 0 && f[i] < f[i - 1]) return SignalStatus::kInvalidArgument;
     }
 
     if ((order % 2) == 1 && m[nf - 1] != 0.0) order += 1;
@@ -297,7 +299,9 @@ SignalStatus firls(i32 order, ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> w,
         return SignalStatus::kInvalidArgument;
     }
     for (usize i = 0; i < fn; ++i) {
-        if (f[i] < 0.0 || f[i] > 1.0) return SignalStatus::kInvalidArgument;
+        if (!is_finite(f[i]) || !is_finite(a[i]) || f[i] < 0.0 || f[i] > 1.0) {
+            return SignalStatus::kInvalidArgument;
+        }
         if (i > 0 && f[i] < f[i - 1]) return SignalStatus::kInvalidArgument;
     }
     const usize num_bands = fn / 2;
@@ -405,7 +409,9 @@ SignalStatus firpm(i32 order, ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> w,
     const usize num_bands = fn / 2;
     if (!w.empty() && w.size() != num_bands) return SignalStatus::kInvalidArgument;
     for (usize i = 0; i < fn; ++i) {
-        if (f[i] < 0.0 || f[i] > 1.0) return SignalStatus::kInvalidArgument;
+        if (!is_finite(f[i]) || !is_finite(a[i]) || f[i] < 0.0 || f[i] > 1.0) {
+            return SignalStatus::kInvalidArgument;
+        }
         if (i > 0 && f[i] < f[i - 1]) return SignalStatus::kInvalidArgument;
     }
 
@@ -445,7 +451,7 @@ SignalStatus firpm(i32 order, ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> w,
         const f64 a1 = a[2 * k];
         const f64 a2 = a[2 * k + 1];
         const f64 wt = w.empty() ? 1.0 : w[k];
-        if (wt <= 0.0) return SignalStatus::kInvalidArgument;
+        if (!is_finite(wt) || !(wt > 0.0)) return SignalStatus::kInvalidArgument;
 
         Array<f64> f_band(alloc);
         f64 f_cur =

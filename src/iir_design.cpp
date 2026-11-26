@@ -1,6 +1,7 @@
 #include "keel/signal.h"
 
 #include "keel/algo.h"
+#include "keel/arena.h"
 #include "keel/array.h"
 #include "keel/math.h"
 #include "keel/poly.h"
@@ -228,6 +229,14 @@ SignalStatus finish_iir_design(const ZpkResult& proto, ArrayRef<f64> wn, FilterT
     if (is_band ? (wn.size() != 2) : (wn.size() != 1)) {
         return SignalStatus::kInvalidArgument;
     }
+    for (usize i = 0; i < wn.size(); ++i) {
+        if (!keel::is_finite(wn[i]) || !(wn[i] > 0.0) || (!analog && !(wn[i] < 1.0))) {
+            return SignalStatus::kInvalidArgument;
+        }
+    }
+    if (is_band && !(wn[0] < wn[1])) {
+        return SignalStatus::kInvalidArgument;
+    }
 
     f64 wo_analog[2] = {0.0, 0.0};
     for (usize i = 0; i < wn.size(); ++i) {
@@ -292,7 +301,16 @@ struct OrdNorm {
 };
 
 SignalStatus normalise_ord(ArrayRef<f64> wp, ArrayRef<f64> ws, bool analog, OrdNorm& n) noexcept {
-    if (wp.size() == 1 && ws.size() == 1) {
+    if (wp.size() != ws.size() || (wp.size() != 1 && wp.size() != 2)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < wp.size(); ++i) {
+        if (!keel::is_finite(wp[i]) || !keel::is_finite(ws[i]) || !(wp[i] > 0.0) || !(ws[i] > 0.0) ||
+            (!analog && (!(wp[i] < 1.0) || !(ws[i] < 1.0)))) {
+            return SignalStatus::kInvalidArgument;
+        }
+    }
+    if (wp.size() == 1) {
         const f64 op = prewarp_wp(wp[0], analog);
         const f64 os = prewarp_wp(ws[0], analog);
         if (op == os) {
@@ -308,29 +326,47 @@ SignalStatus normalise_ord(ArrayRef<f64> wp, ArrayRef<f64> ws, bool analog, OrdN
         n.wo_stopband = os;
         return SignalStatus::kOk;
     }
-    if (wp.size() == 2 && ws.size() == 2) {
-        const f64 op1 = prewarp_wp(wp[0], analog);
-        const f64 op2 = prewarp_wp(wp[1], analog);
-        const f64 os1 = prewarp_wp(ws[0], analog);
-        const f64 os2 = prewarp_wp(ws[1], analog);
-        const bool bp = (os1 < op1 && op2 < os2);
-        n.ftype = bp ? FilterType::kBandpass : FilterType::kBandstop;
+    if (!(wp[0] < wp[1]) || !(ws[0] < ws[1])) {
+        return SignalStatus::kInvalidArgument;
+    }
+    f64 op1 = prewarp_wp(wp[0], analog);
+    f64 op2 = prewarp_wp(wp[1], analog);
+    const f64 os1 = prewarp_wp(ws[0], analog);
+    const f64 os2 = prewarp_wp(ws[1], analog);
+    const bool bp = (os1 < op1 && op2 < os2);
+    const bool bs = (op1 < os1 && os2 < op2);
+    if (!bp && !bs) {
+        return SignalStatus::kInvalidArgument;
+    }
+    n.ftype = bp ? FilterType::kBandpass : FilterType::kBandstop;
+    if (bp) {
         const f64 wo = keel::sqrt(op1 * op2);
         const f64 bw = op2 - op1;
         n.wo_low = op1;
         n.wo_high = op2;
-        if (bp) {
-            const f64 m1 = keel::abs((os1 * os1 - wo * wo) / (bw * os1));
-            const f64 m2 = keel::abs((os2 * os2 - wo * wo) / (bw * os2));
-            n.ratio = keel::min(m1, m2);
+        const f64 m1 = keel::abs((os1 * os1 - wo * wo) / (bw * os1));
+        const f64 m2 = keel::abs((os2 * os2 - wo * wo) / (bw * os2));
+        n.ratio = keel::min(m1, m2);
+    } else {
+        // Tighten the looser passband edge so geometric center matches stopband center.
+        const f64 os_prod = os1 * os2;
+        if (op1 * op2 < os_prod) {
+            op1 = os_prod / op2;
         } else {
-            const f64 m1 = keel::abs((bw * os1) / (os1 * os1 - wo * wo));
-            const f64 m2 = keel::abs((bw * os2) / (os2 * os2 - wo * wo));
-            n.ratio = keel::min(m1, m2);
+            op2 = os_prod / op1;
         }
-        return SignalStatus::kOk;
+        const f64 wo = keel::sqrt(op1 * op2);
+        const f64 bw = op2 - op1;
+        n.wo_low = op1;
+        n.wo_high = op2;
+        const f64 m1 = keel::abs((bw * os1) / (os1 * os1 - wo * wo));
+        const f64 m2 = keel::abs((bw * os2) / (os2 * os2 - wo * wo));
+        n.ratio = keel::min(m1, m2);
     }
-    return SignalStatus::kInvalidArgument;
+    if (!(n.ratio > 1.0)) {
+        return SignalStatus::kInvalidArgument;
+    }
+    return SignalStatus::kOk;
 }
 
 f64 remlpord(f64 f1, f64 f2, f64 d1, f64 d2) noexcept {
@@ -393,7 +429,7 @@ SignalStatus buttap(i32 n, ZpkResult& out, Allocator* alloc) {
 }
 
 SignalStatus cheb1ap(i32 n, f64 rp_db, ZpkResult& out, Allocator* alloc) {
-    if (n <= 0 || !(rp_db > 0.0)) return SignalStatus::kInvalidArgument;
+    if (n <= 0 || !keel::is_finite(rp_db) || !(rp_db > 0.0)) return SignalStatus::kInvalidArgument;
     const f64 eps = keel::sqrt(keel::pow(10.0, rp_db / 10.0) - 1.0);
     const f64 mu = keel::asinh(1.0 / eps) / as<f64>(n);
     out.z = Array<c64>(alloc);
@@ -416,7 +452,7 @@ SignalStatus cheb1ap(i32 n, f64 rp_db, ZpkResult& out, Allocator* alloc) {
 }
 
 SignalStatus cheb2ap(i32 n, f64 rs_db, ZpkResult& out, Allocator* alloc) {
-    if (n <= 0 || !(rs_db > 0.0)) return SignalStatus::kInvalidArgument;
+    if (n <= 0 || !keel::is_finite(rs_db) || !(rs_db > 0.0)) return SignalStatus::kInvalidArgument;
     const f64 delta = 1.0 / keel::sqrt(keel::pow(10.0, rs_db / 10.0) - 1.0);
     const f64 mu = keel::asinh(1.0 / delta) / as<f64>(n);
 
@@ -496,21 +532,51 @@ SignalStatus besselap(i32 n, ZpkResult& out, Allocator* alloc) {
         ArrayRef<c64>(kB4, 4), ArrayRef<c64>(kB5, 5), ArrayRef<c64>(kB6, 6),
         ArrayRef<c64>(kB7, 7), ArrayRef<c64>(kB8, 8),
     };
+    if (n < 0 || n > 25) {
+        return SignalStatus::kInvalidArgument;
+    }
     out.z = Array<c64>(alloc);
-    out.p = (n >= 0 && n <= 8) ? Array<c64>::from(kTables[n], alloc) : Array<c64>(alloc);
+    if (n <= 8) {
+        out.p = Array<c64>::from(kTables[n], alloc);
+        out.k = 1.0;
+        return SignalStatus::kOk;
+    }
+    // Reverse Bessel polynomial recurrence B_k(s) = (2k-1)*B_{k-1}(s) + s^2 * B_{k-2}(s)
+    // in ascending powers of s, then roots scaled so prod(-p_i) = 1 (MATLAB besselap convention).
+    ArenaTemp scratch = keel::get_scratch(alloc);
+    Array<f64> bm2(1, 1.0, scratch.allocator());
+    Array<f64> bm1(2, 1.0, scratch.allocator());
+    for (i32 k = 2; k <= n; ++k) {
+        Array<f64> bk(as<usize>(k + 1), 0.0, scratch.allocator());
+        const f64 c = as<f64>(2 * k - 1);
+        for (usize i = 0; i < bm1.size(); ++i) bk[i] += c * bm1[i];
+        for (usize i = 0; i < bm2.size(); ++i) bk[i + 2] += bm2[i];
+        bm2 = keel::move(bm1);
+        bm1 = keel::move(bk);
+    }
+    Array<f64> desc(as<usize>(n + 1), 0.0, scratch.allocator());
+    for (usize i = 0; i <= as<usize>(n); ++i) {
+        desc[i] = bm1[as<usize>(n) - i];
+    }
+    Array<c64> poles = keel::poly::roots(desc.as_ref(), scratch.allocator());
+    const f64 scale = keel::pow(bm1[0], -1.0 / as<f64>(n));
+    for (usize i = 0; i < poles.size(); ++i) {
+        poles[i] *= scale;
+    }
+    out.p = order_roots_canonical(keel::move(poles), false, true, false, alloc);
     out.k = 1.0;
     return SignalStatus::kOk;
 }
 
 SignalStatus ellipap(i32 n, f64 rp_db, f64 rs_db, ZpkResult& out, Allocator* alloc) {
+    if (n < 0 || !keel::is_finite(rp_db) || !keel::is_finite(rs_db) ||
+        !(rp_db > 0.0) || !(rs_db > 0.0) || !(rs_db > rp_db)) {
+        return SignalStatus::kInvalidArgument;
+    }
     out.z = Array<c64>(alloc);
     out.p = Array<c64>(alloc);
-    if (n <= 0) {
+    if (n == 0) {
         out.k = keel::pow(10.0, -rp_db / 20.0);
-        return SignalStatus::kOk;
-    }
-    if (rp_db <= 0.0 || rs_db <= 0.0) {
-        out.k = 1.0;
         return SignalStatus::kOk;
     }
 
@@ -667,6 +733,10 @@ SignalStatus lp2bs(ArrayRef<c64> z, ArrayRef<c64> p, f64 k, f64 wo, f64 bw, ZpkR
 
 SignalStatus bilinear(ArrayRef<f64> b, ArrayRef<f64> a, f64 fs, f64 fp, TfResult& out,
                       Allocator* alloc) {
+    if (!keel::is_finite(fs) || !(fs > 0.0) || !keel::is_finite(fp) || fp < 0.0 ||
+        fp >= 0.5 * fs) {
+        return SignalStatus::kInvalidArgument;
+    }
     if (b.empty() || a.empty()) {
         out.b = Array<f64>(alloc);
         out.a = Array<f64>(alloc);
@@ -954,14 +1024,18 @@ SignalStatus besself(i32 n, ArrayRef<f64> wn, FilterType ftype, bool analog, TfR
 
 SignalStatus buttord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, bool analog,
                      OrderResult& out) noexcept {
+    if (!keel::is_finite(rp_db) || !keel::is_finite(rs_db) || !(rp_db > 0.0) || !(rs_db > rp_db)) {
+        return SignalStatus::kInvalidArgument;
+    }
     OrdNorm norm;
     const SignalStatus st = normalise_ord(wp, ws, analog, norm);
     if (st != SignalStatus::kOk) return st;
     const f64 gs_lin = keel::pow(10.0, rs_db / 10.0) - 1.0;
     const f64 gp_lin = keel::pow(10.0, rp_db / 10.0) - 1.0;
-    if (gp_lin <= 0.0 || gs_lin <= 0.0) return SignalStatus::kInvalidArgument;
+    if (!(gp_lin > 0.0) || !(gs_lin > gp_lin)) return SignalStatus::kInvalidArgument;
 
-    const i32 ord = as<i32>(keel::ceil(0.5 * keel::log10(gs_lin / gp_lin) / keel::log10(norm.ratio)));
+    const i32 ord =
+        keel::max<i32>(1, as<i32>(keel::ceil(0.5 * keel::log10(gs_lin / gp_lin) / keel::log10(norm.ratio))));
     const f64 r = keel::pow(gs_lin, 1.0 / (2.0 * as<f64>(ord)));
     out.order = ord;
     if (norm.ftype == FilterType::kLowpass || norm.ftype == FilterType::kHighpass) {
@@ -970,8 +1044,14 @@ SignalStatus buttord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, b
         out.wn[0] = dewarp_wp(wn_a, analog);
         out.wn_count = 1;
     } else {
-        out.wn[0] = dewarp_wp(norm.wo_low, analog);
-        out.wn[1] = dewarp_wp(norm.wo_high, analog);
+        const f64 w0_norm = norm.ratio / r;
+        const f64 wo2 = norm.wo_low * norm.wo_high;
+        const f64 bw = norm.wo_high - norm.wo_low;
+        const f64 bw_eff = (norm.ftype == FilterType::kBandpass) ? (w0_norm * bw) : (bw / w0_norm);
+        const f64 w2 = 0.5 * (bw_eff + keel::sqrt(bw_eff * bw_eff + 4.0 * wo2));
+        const f64 w1 = wo2 / w2;
+        out.wn[0] = dewarp_wp(w1, analog);
+        out.wn[1] = dewarp_wp(w2, analog);
         out.wn_count = 2;
     }
     return SignalStatus::kOk;
@@ -979,14 +1059,18 @@ SignalStatus buttord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, b
 
 SignalStatus cheb1ord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, bool analog,
                       OrderResult& out) noexcept {
+    if (!keel::is_finite(rp_db) || !keel::is_finite(rs_db) || !(rp_db > 0.0) || !(rs_db > rp_db)) {
+        return SignalStatus::kInvalidArgument;
+    }
     OrdNorm norm;
     const SignalStatus st = normalise_ord(wp, ws, analog, norm);
     if (st != SignalStatus::kOk) return st;
     const f64 gs_lin = keel::pow(10.0, rs_db / 10.0) - 1.0;
     const f64 gp_lin = keel::pow(10.0, rp_db / 10.0) - 1.0;
-    if (gp_lin <= 0.0 || gs_lin <= 0.0) return SignalStatus::kInvalidArgument;
+    if (!(gp_lin > 0.0) || !(gs_lin > gp_lin)) return SignalStatus::kInvalidArgument;
 
-    out.order = as<i32>(keel::ceil(keel::acosh(keel::sqrt(gs_lin / gp_lin)) / keel::acosh(norm.ratio)));
+    out.order =
+        keel::max<i32>(1, as<i32>(keel::ceil(keel::acosh(keel::sqrt(gs_lin / gp_lin)) / keel::acosh(norm.ratio))));
     out.wn_count = wp.size();
     for (usize i = 0; i < wp.size(); ++i) out.wn[i] = wp[i];
     return SignalStatus::kOk;
@@ -994,14 +1078,18 @@ SignalStatus cheb1ord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, 
 
 SignalStatus cheb2ord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, bool analog,
                       OrderResult& out) noexcept {
+    if (!keel::is_finite(rp_db) || !keel::is_finite(rs_db) || !(rp_db > 0.0) || !(rs_db > rp_db)) {
+        return SignalStatus::kInvalidArgument;
+    }
     OrdNorm norm;
     const SignalStatus st = normalise_ord(wp, ws, analog, norm);
     if (st != SignalStatus::kOk) return st;
     const f64 gs_lin = keel::pow(10.0, rs_db / 10.0) - 1.0;
     const f64 gp_lin = keel::pow(10.0, rp_db / 10.0) - 1.0;
-    if (gp_lin <= 0.0 || gs_lin <= 0.0) return SignalStatus::kInvalidArgument;
+    if (!(gp_lin > 0.0) || !(gs_lin > gp_lin)) return SignalStatus::kInvalidArgument;
 
-    out.order = as<i32>(keel::ceil(keel::acosh(keel::sqrt(gs_lin / gp_lin)) / keel::acosh(norm.ratio)));
+    out.order =
+        keel::max<i32>(1, as<i32>(keel::ceil(keel::acosh(keel::sqrt(gs_lin / gp_lin)) / keel::acosh(norm.ratio))));
     out.wn_count = ws.size();
     for (usize i = 0; i < ws.size(); ++i) out.wn[i] = ws[i];
     return SignalStatus::kOk;
@@ -1009,34 +1097,15 @@ SignalStatus cheb2ord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, 
 
 SignalStatus ellipord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, bool analog,
                       OrderResult& out) noexcept {
-    if (rp_db <= 0.0 || rs_db <= 0.0 || wp.size() != ws.size() ||
-        (wp.size() != 1 && wp.size() != 2)) {
+    if (!keel::is_finite(rp_db) || !keel::is_finite(rs_db) || !(rp_db > 0.0) || !(rs_db > rp_db) ||
+        wp.size() != ws.size() || (wp.size() != 1 && wp.size() != 2)) {
         return SignalStatus::kInvalidArgument;
     }
+    OrdNorm norm;
+    const SignalStatus st = normalise_ord(wp, ws, analog, norm);
+    if (st != SignalStatus::kOk) return st;
     const usize num_w = wp.size();
-    const i32 ftype = 2 * as<i32>(num_w - 1) + ((wp[0] < ws[0]) ? 1 : 2);
-
-    f64 wp_a[2] = {0.0, 0.0};
-    f64 ws_a[2] = {0.0, 0.0};
-    for (usize i = 0; i < num_w; ++i) {
-        wp_a[i] = prewarp_wp(wp[i], analog);
-        ws_a[i] = prewarp_wp(ws[i], analog);
-    }
-
-    f64 wa_min = 0.0;
-    if (ftype == 1) {
-        wa_min = keel::abs(ws_a[0] / wp_a[0]);
-    } else if (ftype == 2) {
-        wa_min = keel::abs(wp_a[0] / ws_a[0]);
-    } else if (ftype == 3) {
-        const f64 a0 = keel::abs((ws_a[0] * (wp_a[0] - wp_a[1])) / (ws_a[0] * ws_a[0] - wp_a[0] * wp_a[1]));
-        const f64 a1 = keel::abs((ws_a[1] * (wp_a[0] - wp_a[1])) / (ws_a[1] * ws_a[1] - wp_a[0] * wp_a[1]));
-        wa_min = keel::min(a0, a1);
-    } else {
-        const f64 a0 = keel::abs((ws_a[0] * ws_a[0] - wp_a[0] * wp_a[1]) / (ws_a[0] * (wp_a[0] - wp_a[1])));
-        const f64 a1 = keel::abs((ws_a[1] * ws_a[1] - wp_a[0] * wp_a[1]) / (ws_a[1] * (wp_a[0] - wp_a[1])));
-        wa_min = keel::min(a0, a1);
-    }
+    const f64 wa_min = norm.ratio;
 
     const f64 eps = keel::sqrt(keel::pow(10.0, 0.1 * rp_db) - 1.0);
     const f64 k1 = eps / keel::sqrt(keel::pow(10.0, 0.1 * rs_db) - 1.0);
@@ -1047,10 +1116,10 @@ SignalStatus ellipord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, 
     const f64 k1k1 = ellip_km(k1 * k1);
     const f64 k1k1c = ellip_km(1.0 - k1 * k1);
 
-    out.order = as<i32>(keel::ceil(k0 * k1k1c / (k1c * k1k1)));
+    out.order = keel::max<i32>(1, as<i32>(keel::ceil(k0 * k1k1c / (k1c * k1k1))));
     out.wn_count = num_w;
     for (usize i = 0; i < num_w; ++i) {
-        out.wn[i] = analog ? wp_a[i] : wp[i];
+        out.wn[i] = wp[i];
     }
     return SignalStatus::kOk;
 }
@@ -1059,17 +1128,23 @@ SignalStatus firpmord(ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> dev, f64 f
                       FirpmOrdResult& out, Allocator* alloc) {
     const usize mf = f.size();
     const usize nbands = a.size();
-    if (nbands < 2 || nbands != dev.size() || mf != 2 * (nbands - 1) || !(fs > 0.0)) {
+    if (nbands < 2 || nbands != dev.size() || mf != 2 * (nbands - 1) ||
+        !keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
 
     Array<f64> fcuts(mf, 0.0, alloc);
     Array<f64> devs(nbands, 0.0, alloc);
     for (usize i = 0; i < mf; ++i) {
+        if (!keel::is_finite(f[i]) || f[i] < 0.0) return SignalStatus::kInvalidArgument;
         fcuts[i] = f[i] / fs;
         if (fcuts[i] > 0.5) return SignalStatus::kInvalidArgument;
+        if (i > 0 && !(fcuts[i] > fcuts[i - 1])) return SignalStatus::kInvalidArgument;
     }
     for (usize i = 0; i < nbands; ++i) {
+        if (!keel::is_finite(a[i]) || !keel::is_finite(dev[i]) || !(dev[i] > 0.0)) {
+            return SignalStatus::kInvalidArgument;
+        }
         const f64 base = ((a[i] == 0.0) ? 1.0 : 0.0) + a[i];
         devs[i] = (base != 0.0) ? (dev[i] / base) : dev[i];
     }
@@ -1129,17 +1204,23 @@ SignalStatus kaiserord(ArrayRef<f64> f, ArrayRef<f64> a, ArrayRef<f64> dev, f64 
                        KaiserOrdResult& out, Allocator* alloc) {
     const usize mf = f.size();
     const usize nbands = a.size();
-    if (nbands < 2 || nbands != dev.size() || mf != 2 * (nbands - 1) || !(fs > 0.0)) {
+    if (nbands < 2 || nbands != dev.size() || mf != 2 * (nbands - 1) ||
+        !keel::is_finite(fs) || !(fs > 0.0)) {
         return SignalStatus::kInvalidArgument;
     }
 
     Array<f64> fcuts(mf, 0.0, alloc);
     Array<f64> devs(nbands, 0.0, alloc);
     for (usize i = 0; i < mf; ++i) {
+        if (!keel::is_finite(f[i]) || f[i] < 0.0) return SignalStatus::kInvalidArgument;
         fcuts[i] = f[i] / fs;
         if (fcuts[i] >= 0.5) return SignalStatus::kInvalidArgument;
+        if (i > 0 && !(fcuts[i] > fcuts[i - 1])) return SignalStatus::kInvalidArgument;
     }
     for (usize i = 0; i < nbands; ++i) {
+        if (!keel::is_finite(a[i]) || !keel::is_finite(dev[i]) || !(dev[i] > 0.0)) {
+            return SignalStatus::kInvalidArgument;
+        }
         const f64 base = ((a[i] == 0.0) ? 1.0 : 0.0) + a[i];
         devs[i] = (base != 0.0) ? (dev[i] / base) : dev[i];
     }
