@@ -41,7 +41,7 @@ if(NOT TARGET keel::fft)
     FetchContent_Declare(
         keel_fft
         GIT_REPOSITORY https://github.com/keelcpp/fft.git
-        GIT_TAG        8f27754ba6e5671439d97d3847479bdbf7ccfee7
+        GIT_TAG        739550655dfea621d6f666d189ce3bc0ed49efa5
     )
     FetchContent_MakeAvailable(keel_fft)
 endif()
@@ -64,7 +64,7 @@ if(NOT TARGET keel::poly)
     FetchContent_Declare(
         keel_poly
         GIT_REPOSITORY https://github.com/keelcpp/poly.git
-        GIT_TAG        49f000d390c73b0cb426f41f11465aaf0f24e82a
+        GIT_TAG        4a647adc35d5e7fc0a0a06c3bcfe3a823d807c9b
     )
     FetchContent_MakeAvailable(keel_poly)
 endif()
