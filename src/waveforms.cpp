@@ -195,9 +195,9 @@ SignalStatus chirp(ArrayRef<f64> t, f64 f0, f64 t1, f64 f1, ChirpMethod method, 
                 const f64 ti = t[i];
                 const f64 tj = t[j];
                 const f64 phase_i =
-                    kTau * (f1 * tj - (k / 3.0) * tj * tj * tj) + phi_rad;
+                    kTau * (f1 * tj - (k / 3.0) * tj * tj * tj) - phi_rad;
                 const f64 phase_j =
-                    kTau * (f1 * ti - (k / 3.0) * ti * ti * ti) + phi_rad;
+                    kTau * (f1 * ti - (k / 3.0) * ti * ti * ti) - phi_rad;
                 out[i] = keel::cos(phase_i);
                 out[j] = keel::cos(phase_j);
             }

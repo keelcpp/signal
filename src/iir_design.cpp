@@ -300,7 +300,8 @@ struct OrdNorm {
     FilterType ftype = FilterType::kLowpass;
 };
 
-SignalStatus normalise_ord(ArrayRef<f64> wp, ArrayRef<f64> ws, bool analog, OrdNorm& n) noexcept {
+SignalStatus normalise_ord(ArrayRef<f64> wp, ArrayRef<f64> ws, bool analog, OrdNorm& n,
+                           bool tighten_bs = true) noexcept {
     if (wp.size() != ws.size() || (wp.size() != 1 && wp.size() != 2)) {
         return SignalStatus::kInvalidArgument;
     }
@@ -348,12 +349,14 @@ SignalStatus normalise_ord(ArrayRef<f64> wp, ArrayRef<f64> ws, bool analog, OrdN
         const f64 m2 = keel::abs((os2 * os2 - wo * wo) / (bw * os2));
         n.ratio = keel::min(m1, m2);
     } else {
-        // Tighten the looser passband edge so geometric center matches stopband center.
-        const f64 os_prod = os1 * os2;
-        if (op1 * op2 < os_prod) {
-            op1 = os_prod / op2;
-        } else {
-            op2 = os_prod / op1;
+        if (tighten_bs) {
+            // Tighten the looser passband edge so geometric center matches stopband center.
+            const f64 os_prod = os1 * os2;
+            if (op1 * op2 < os_prod) {
+                op1 = os_prod / op2;
+            } else {
+                op2 = os_prod / op1;
+            }
         }
         const f64 wo = keel::sqrt(op1 * op2);
         const f64 bw = op2 - op1;
@@ -1102,7 +1105,7 @@ SignalStatus ellipord(ArrayRef<f64> wp, ArrayRef<f64> ws, f64 rp_db, f64 rs_db, 
         return SignalStatus::kInvalidArgument;
     }
     OrdNorm norm;
-    const SignalStatus st = normalise_ord(wp, ws, analog, norm);
+    const SignalStatus st = normalise_ord(wp, ws, analog, norm, /*tighten_bs=*/false);
     if (st != SignalStatus::kOk) return st;
     const usize num_w = wp.size();
     const f64 wa_min = norm.ratio;

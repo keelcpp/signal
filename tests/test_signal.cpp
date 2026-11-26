@@ -1250,6 +1250,26 @@ void test_hardening_regressions() {
 
         f64 b_odd[6]{};
         CHECK(sig::fir1_single(5, 0.4, true, b_odd) == sig::SignalStatus::kInvalidArgument);
+
+        // Quadratic chirp reverse-vertex sign on non-zero phi matches reference engine.
+        const f64 tc_phi[5] = {0.0, 0.25, 0.5, 0.75, 1.0};
+        f64 yc_phi[5]{};
+        CHECK(sig::chirp(tc_phi, 3.0, 1.0, 11.0, sig::ChirpMethod::kQuadratic, 30.0,
+                         sig::ChirpQuadShape::kConvex, yc_phi) == sig::SignalStatus::kOk);
+        // At t=0: fliplr uses t_end=1 -> cos(2*pi*(11*1 - (8/3)*1^3) - pi/6) = cos(2*pi*(25/3) - pi/6) = cos(pi/2) = 0
+        CHECK_NEAR(yc_phi[0], 0.0, 1e-12);
+        // At t=1: fliplr uses t_0=0 -> cos(-pi/6) = sqrt(3)/2
+        CHECK_NEAR(yc_phi[4], keel::sqrt(3.0) * 0.5, 1e-12);
+
+        // Analog bandstop ellipord keeps Wn = wp unmodified (does not tighten wp).
+        const f64 wp_bs[2] = {100.0, 600.0};
+        const f64 ws_bs[2] = {200.0, 500.0};
+        sig::OrderResult ord_bs{};
+        CHECK(sig::ellipord(wp_bs, ws_bs, 3.0, 40.0, true, ord_bs) == sig::SignalStatus::kOk);
+        CHECK(ord_bs.order == 5);
+        CHECK(ord_bs.wn_count == 2);
+        CHECK_NEAR(ord_bs.wn[0], 100.0, 1e-12);
+        CHECK_NEAR(ord_bs.wn[1], 600.0, 1e-12);
     }
 }
 
